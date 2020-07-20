@@ -41,7 +41,7 @@ class Review:
 
 
 def main():
-    print(typing.get_type_hints(Student))
+    pass
 
 
 if __name__ == "__main__":
