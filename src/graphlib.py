@@ -15,9 +15,9 @@ class Graph:
 
 
     def subgraph(self, /, targets:Optional[Set[Node]] = None, start:Optional[Node] = None) -> 'Graph':
-        res_graph = {}
+        res_graph:Dict[Node, Set[Node]] = {}
         if targets is not None:
-            checked = set()
+            checked:Set[Node] = set()
             self._out_subgraph_with_targets(targets, start, res_graph, checked)
         else:
             self._out_subgraph(start, res_graph)
