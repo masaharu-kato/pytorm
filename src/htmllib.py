@@ -8,17 +8,11 @@ class Stream(metaclass=ABCMeta):
     def __init__(self, out_stream:IO):
         self.out_stream = out_stream
 
-    def output(self, text:str, *, end:str='\n'):
-        print(text, end=end, file=self.out_stream)
-
-    def output_in_line(self, text:str):
-        self.output(text, end='')
-
-    def output_in_line_end(self, text:str):
-        self.output(text)
+    def output(self, text:str, *, line_end:bool=True):
+        print(text, end=(None if line_end else ''), file=self.out_stream)
 
     @abstractclassmethod
-    def add_indent(self, lv:int=1): pasmn.s
+    def add_indent(self, lv:int=1): pass
 
     @abstractclassmethod
     def sub_indent(self, lv:int=1): pass
@@ -29,6 +23,7 @@ class FormattedStream(Stream):
         super().__init__(out_stream)
         self.indent_str = indent_str
         self.indent_level = indent_level
+        self.is_line_middle = False
 
     def add_indent(self, lv:int=1):
         self.indent_level = max(self.indent_level + lv, 0) 
@@ -36,15 +31,9 @@ class FormattedStream(Stream):
     def sub_indent(self, lv:int=1):
         self.add_indent(-lv)
 
-    def output(self, text:str, *, end:str='\n'):
-        super().output(self.indent_str * self.indent_level + text, end=end)
-
-    def output_in_line(self, text:str):
-        super().output(text, end='')
-
-    def output_in_line_end(self, text:str):
-        super().output(text)
-
+    def output(self, text:str, *, line_end:bool=True):
+        super().output(((self.indent_str * self.indent_level) if not self.is_line_middle else '') + text, line_end=line_end)
+        self.is_line_middle = not line_end
 
 class Page:
     def __init__(self, stream:Stream):
@@ -57,10 +46,16 @@ class Page:
         tag_name:str,
         attrs:Dict[str, str] = {},
         contents:Optional[Iterable] = None,
-        **options
     ):
-        if self.closed: raise RuntimeError('FlowElement already closed.')
-        return Element(self, tag_name, attrs, contents, **options)
+        if self.closed: raise RuntimeError('Element already closed.')
+        return Element(self, tag_name, attrs, contents)
+
+    def empty_element(self,
+        tag_name:str,
+        attrs:Dict[str, str] = {},
+    ):
+        if self.closed: raise RuntimeError('Element already closed.')
+        return EmptyElement(self, tag_name, attrs)
 
     def __enter__(self):
         return self
@@ -70,14 +65,11 @@ class Page:
         return self
 
     def close(self):
-        if self.closed: raise RuntimeError('FlowElement already closed.')
+        if self.closed: raise RuntimeError('Element already closed.')
         self.closed = True
 
-    def text(self, text:str):
-        self.output(html.escape(text))
-
-    def text_in_line(self, text:str):
-        self.output_in_line(html.escape(text))
+    def text(self, text:str, *, line_end:bool=True):
+        self.output(html.escape(text), line_end=line_end)
 
     def doctype(self):
         self.stream.output('<!DOCTYPE html>')
@@ -85,53 +77,56 @@ class Page:
     def html(self, *contents, **attrs):
         return Html(self, attrs, contents)
 
-    def output(self, text:str, *, end:str='\n'):
-        if self.closed: raise RuntimeError('FlowElement already closed.')
-        return self.stream.output(text, end=end)
-
-    def output_in_line(self, text:str):
-        if self.closed: raise RuntimeError('FlowElement already closed.')
-        return self.stream.output_in_line(text)
-
-    def output_in_line_end(self, text:str):
-        if self.closed: raise RuntimeError('FlowElement already closed.')
-        return self.stream.output_in_line_end(text)
+    def output(self, text:str, *, line_end:bool=True):
+        if self.closed: raise RuntimeError('ElementWithFlow already closed.')
+        return self.stream.output(text, line_end=line_end)
 
 
-class Element(Page):
+
+
+class ElementBase(Page):
+    def __init__(self,
+        parent:Page,
+        tag_name:str,
+    ):
+        self.stream = parent.stream
+        self.tag_name = html.escape(tag_name)
+
+    def output_opening_tag(self, attrs:Dict[str, Any], *, line_end:bool=True, close:bool=False):
+        self.output('<' + self.tag_name + ''.join(
+                ' ' + html.escape(k.strip('_')) + '="' + html.escape(str(v), quote=True) + '"' for k, v in attrs.items() if v is not None
+            ) + (' /' if close else '') +  '>',
+            line_end = line_end
+        )
+
+    def output_closing_tag(self):
+        self.output('</' + self.tag_name + '>')
+
+
+
+class Element(ElementBase):
     def __init__(self,
         parent:Page,
         tag_name:str,
         attrs:Dict[str, Any] = {},
         contents:Any = None,
-        *,
-        self_close:bool=False,
     ):
-        self.stream = parent.stream
-        self.tag_name = html.escape(tag_name)
+        super().__init__(parent, tag_name)
         
         self.closed = False
 
-        self.output(
-            '<' + self.tag_name + ''.join(
-                ' ' + html.escape(k.strip('_')) + '="' + html.escape(str(v), quote=True) + '"' for k, v in attrs.items() if v is not None
-            ) + (' /' if self_close else '') +  '>',
-            end = ('' if contents else '\n')
-        )
-
-        if self_close:
-            return
+        self.output_opening_tag(attrs, line_end=not contents)
 
         if contents:
 
             if isinstance(contents, str):
-                self.text_in_line(contents)
+                self.text(contents, line_end=False)
             elif isinstance(contents, Iterable):
-                self.text_in_line(' '.join(map(str, contents)))
+                self.text(' '.join(map(str, contents)), line_end=False)
             else:
-                self.text_in_line(str(contents))
+                self.text(str(contents), line_end=False)
 
-            self.output_in_line_end('</' + self.tag_name + '>')
+            self.output_closing_tag()
             self.closed = True
             return
 
@@ -140,15 +135,28 @@ class Element(Page):
 
     def close(self):
         if self.closed:
-            raise RuntimeError('FlowElement already closed.')
+            raise RuntimeError('ElementWithFlow already closed.')
         self.stream.sub_indent()
-        self.output('</' + self.tag_name + '>')
+        self.output_closing_tag()
         self.closed = True
+
+
+class EmptyElement(ElementBase):
+    def __init__(self,
+        parent:Page,
+        tag_name:str,
+        attrs:Dict[str, Any] = {},
+    ):
+        self.stream = parent.stream
+        self.tag_name = html.escape(tag_name)
+        
+        self.closed = False
+
+        self.output_opening_tag(attrs, close=True)
 
 
 
 OptStr = Optional[str]
-
 
 
 class Html(Element):
@@ -159,7 +167,7 @@ class Html(Element):
         return Head(self, attrs, contents)
 
     def body(self, *contents, **attrs):
-        return FlowElement(self, 'body', attrs, contents)
+        return ElementWithFlow(self, 'body', attrs, contents)
 
 class Head(Element):
     def __init__(self, parent, attrs, contents):
@@ -171,39 +179,39 @@ class Head(Element):
     def title(self, *contents, **attrs):
         return Title(self, attrs, contents)
 
-class Meta(Element):
+class Meta(EmptyElement):
     def __init__(self, parent, attrs):
-        super().__init__(parent, 'meta', attrs, self_close=True)
+        super().__init__(parent, 'meta', attrs)
 
 class Title(Element):
     def __init__(self, parent, attrs, content):
         super().__init__(parent, 'title', attrs, content)
 
-class FlowElement(Element):
+class ElementWithFlow(Element):
     def __init__(self, parent, tag_name:str, attrs, contents):
         super().__init__(parent, tag_name, attrs, contents)
 
     def div(self, *contents, **attrs):
-        return FlowElement(self, 'div', attrs, contents)
+        return ElementWithFlow(self, 'div', attrs, contents)
 
     def span(self, *contents, **attrs):
-        return FlowElement(self, 'span', attrs, contents)
+        return ElementWithFlow(self, 'span', attrs, contents)
 
     def p(self, *contents, **attrs):
-        return FlowElement(self, 'p', attrs, contents)
+        return ElementWithFlow(self, 'p', attrs, contents)
 
     def table(self, *contents, **attrs):
         return Table(self, attrs, contents)
 
     def div_class(self, _class, *contents, **attrs):
         """ Alias of `self.div(content, ..., _class='classname', ...)` """
-        return FlowElement(self, 'div', {**attrs, 'class':_class}, contents)
+        return ElementWithFlow(self, 'div', {**attrs, 'class':_class}, contents)
 
     def span_class(self, _class, *contents, **attrs):
-        return FlowElement(self, 'span', {**attrs, 'class':_class}, contents)
+        return ElementWithFlow(self, 'span', {**attrs, 'class':_class}, contents)
 
     def p_class(self, _class, *contents, **attrs):
-        return FlowElement(self, 'p', {**attrs, 'class':_class}, contents)
+        return ElementWithFlow(self, 'p', {**attrs, 'class':_class}, contents)
 
 
     def area  (self, **attrs): return EmptyElement(self, 'area'  , attrs)
@@ -230,62 +238,57 @@ class FlowElement(Element):
     def input(self, **attrs): return Input(self, attrs)
 
 
-    def bdi (self, *contents, **attrs): return PhraseElement(self, 'bdi' , attrs, contents)
-    def bdo (self, *contents, **attrs): return PhraseElement(self, 'bdo' , attrs, contents)
-    def var (self, *contents, **attrs): return PhraseElement(self, 'var' , attrs, contents)
-    def kbd (self, *contents, **attrs): return PhraseElement(self, 'kbd' , attrs, contents)
-    def dfn (self, *contents, **attrs): return PhraseElement(self, 'dfn' , attrs, contents)
-    def cite(self, *contents, **attrs): return PhraseElement(self, 'cite', attrs, contents)
-    def code(self, *contents, **attrs): return PhraseElement(self, 'code', attrs, contents)
+    def bdi (self, *contents, **attrs): return ElementWithPhrase(self, 'bdi' , attrs, contents)
+    def bdo (self, *contents, **attrs): return ElementWithPhrase(self, 'bdo' , attrs, contents)
+    def var (self, *contents, **attrs): return ElementWithPhrase(self, 'var' , attrs, contents)
+    def kbd (self, *contents, **attrs): return ElementWithPhrase(self, 'kbd' , attrs, contents)
+    def dfn (self, *contents, **attrs): return ElementWithPhrase(self, 'dfn' , attrs, contents)
+    def cite(self, *contents, **attrs): return ElementWithPhrase(self, 'cite', attrs, contents)
+    def code(self, *contents, **attrs): return ElementWithPhrase(self, 'code', attrs, contents)
 
-    def a         (self, *contents, **attrs): return FlowElement(self, 'a'         , attrs, contents)
-    def abbr      (self, *contents, **attrs): return FlowElement(self, 'abbr'      , attrs, contents)
-    def address   (self, *contents, **attrs): return FlowElement(self, 'address'   , attrs, contents)
-    def article   (self, *contents, **attrs): return FlowElement(self, 'article'   , attrs, contents)
-    def aside     (self, *contents, **attrs): return FlowElement(self, 'aside'     , attrs, contents)
-    def b         (self, *contents, **attrs): return FlowElement(self, 'b'         , attrs, contents)  
-    def blockquote(self, *contents, **attrs): return FlowElement(self, 'blockquote', attrs, contents)
-    def em        (self, *contents, **attrs): return FlowElement(self, 'em'        , attrs, contents)
-    def footer    (self, *contents, **attrs): return FlowElement(self, 'footer'    , attrs, contents)
-    def ol        (self, *contents, **attrs): return FlowElement(self, 'ol'        , attrs, contents)
-    def ul        (self, *contents, **attrs): return FlowElement(self, 'ul'        , attrs, contents)
-    def h1        (self, *contents, **attrs): return FlowElement(self, 'h1'        , attrs, contents)
-    def h2        (self, *contents, **attrs): return FlowElement(self, 'h2'        , attrs, contents)
-    def h3        (self, *contents, **attrs): return FlowElement(self, 'h3'        , attrs, contents)
-    def h4        (self, *contents, **attrs): return FlowElement(self, 'h4'        , attrs, contents)
-    def h5        (self, *contents, **attrs): return FlowElement(self, 'h5'        , attrs, contents)
-    def h6        (self, *contents, **attrs): return FlowElement(self, 'h6'        , attrs, contents)
-    def header    (self, *contents, **attrs): return FlowElement(self, 'header'    , attrs, contents)
-    def i         (self, *contents, **attrs): return FlowElement(self, 'i'         , attrs, contents)
-    def ins       (self, *contents, **attrs): return FlowElement(self, 'ins'       , attrs, contents)
-    def main      (self, *contents, **attrs): return FlowElement(self, 'main'      , attrs, contents)
-    def map       (self, *contents, **attrs): return FlowElement(self, 'map'       , attrs, contents)
-    def mark      (self, *contents, **attrs): return FlowElement(self, 'mark'      , attrs, contents)
-    def math      (self, *contents, **attrs): return FlowElement(self, 'math'      , attrs, contents)
-    def menu      (self, *contents, **attrs): return FlowElement(self, 'menu'      , attrs, contents)
-    def nav       (self, *contents, **attrs): return FlowElement(self, 'nav'       , attrs, contents)
-    def _output   (self, *contents, **attrs): return FlowElement(self, '_output'   , attrs, contents)
-    def pre       (self, *contents, **attrs): return FlowElement(self, 'pre'       , attrs, contents)
-    def q         (self, *contents, **attrs): return FlowElement(self, 'q'         , attrs, contents)
-    def ruby      (self, *contents, **attrs): return FlowElement(self, 'ruby'      , attrs, contents)
-    def s         (self, *contents, **attrs): return FlowElement(self, 's'         , attrs, contents) 
-    def samp      (self, *contents, **attrs): return FlowElement(self, 'samp'      , attrs, contents)
-    def section   (self, *contents, **attrs): return FlowElement(self, 'section'   , attrs, contents)
-    def small     (self, *contents, **attrs): return FlowElement(self, 'small'     , attrs, contents)
-    def sub       (self, *contents, **attrs): return FlowElement(self, 'sub'       , attrs, contents)
-    def sup       (self, *contents, **attrs): return FlowElement(self, 'sup'       , attrs, contents)
-    def wbr       (self, *contents, **attrs): return FlowElement(self, 'wbr'       , attrs, contents)
-    def _del      (self, *contents, **attrs): return FlowElement(self, 'del'       , attrs, contents)
+    def a         (self, *contents, **attrs): return ElementWithFlow(self, 'a'         , attrs, contents)
+    def abbr      (self, *contents, **attrs): return ElementWithFlow(self, 'abbr'      , attrs, contents)
+    def address   (self, *contents, **attrs): return ElementWithFlow(self, 'address'   , attrs, contents)
+    def article   (self, *contents, **attrs): return ElementWithFlow(self, 'article'   , attrs, contents)
+    def aside     (self, *contents, **attrs): return ElementWithFlow(self, 'aside'     , attrs, contents)
+    def b         (self, *contents, **attrs): return ElementWithFlow(self, 'b'         , attrs, contents)  
+    def blockquote(self, *contents, **attrs): return ElementWithFlow(self, 'blockquote', attrs, contents)
+    def em        (self, *contents, **attrs): return ElementWithFlow(self, 'em'        , attrs, contents)
+    def footer    (self, *contents, **attrs): return ElementWithFlow(self, 'footer'    , attrs, contents)
+    def ol        (self, *contents, **attrs): return ElementWithFlow(self, 'ol'        , attrs, contents)
+    def ul        (self, *contents, **attrs): return ElementWithFlow(self, 'ul'        , attrs, contents)
+    def h1        (self, *contents, **attrs): return ElementWithFlow(self, 'h1'        , attrs, contents)
+    def h2        (self, *contents, **attrs): return ElementWithFlow(self, 'h2'        , attrs, contents)
+    def h3        (self, *contents, **attrs): return ElementWithFlow(self, 'h3'        , attrs, contents)
+    def h4        (self, *contents, **attrs): return ElementWithFlow(self, 'h4'        , attrs, contents)
+    def h5        (self, *contents, **attrs): return ElementWithFlow(self, 'h5'        , attrs, contents)
+    def h6        (self, *contents, **attrs): return ElementWithFlow(self, 'h6'        , attrs, contents)
+    def header    (self, *contents, **attrs): return ElementWithFlow(self, 'header'    , attrs, contents)
+    def i         (self, *contents, **attrs): return ElementWithFlow(self, 'i'         , attrs, contents)
+    def ins       (self, *contents, **attrs): return ElementWithFlow(self, 'ins'       , attrs, contents)
+    def main      (self, *contents, **attrs): return ElementWithFlow(self, 'main'      , attrs, contents)
+    def map       (self, *contents, **attrs): return ElementWithFlow(self, 'map'       , attrs, contents)
+    def mark      (self, *contents, **attrs): return ElementWithFlow(self, 'mark'      , attrs, contents)
+    def math      (self, *contents, **attrs): return ElementWithFlow(self, 'math'      , attrs, contents)
+    def menu      (self, *contents, **attrs): return ElementWithFlow(self, 'menu'      , attrs, contents)
+    def nav       (self, *contents, **attrs): return ElementWithFlow(self, 'nav'       , attrs, contents)
+    def _output   (self, *contents, **attrs): return ElementWithFlow(self, '_output'   , attrs, contents)
+    def pre       (self, *contents, **attrs): return ElementWithFlow(self, 'pre'       , attrs, contents)
+    def q         (self, *contents, **attrs): return ElementWithFlow(self, 'q'         , attrs, contents)
+    def ruby      (self, *contents, **attrs): return ElementWithFlow(self, 'ruby'      , attrs, contents)
+    def s         (self, *contents, **attrs): return ElementWithFlow(self, 's'         , attrs, contents) 
+    def samp      (self, *contents, **attrs): return ElementWithFlow(self, 'samp'      , attrs, contents)
+    def section   (self, *contents, **attrs): return ElementWithFlow(self, 'section'   , attrs, contents)
+    def small     (self, *contents, **attrs): return ElementWithFlow(self, 'small'     , attrs, contents)
+    def sub       (self, *contents, **attrs): return ElementWithFlow(self, 'sub'       , attrs, contents)
+    def sup       (self, *contents, **attrs): return ElementWithFlow(self, 'sup'       , attrs, contents)
+    def wbr       (self, *contents, **attrs): return ElementWithFlow(self, 'wbr'       , attrs, contents)
+    def _del      (self, *contents, **attrs): return ElementWithFlow(self, 'del'       , attrs, contents)
 
 
 # ---- Base element classes ----
 
-class EmptyElement(Element):
-    def __init__(self, parent, tag_name:str, attrs):
-        super().__init__(parent, 'table', attrs, self_close=True)
-
-
-class PhraseElement(Element):
+class ElementWithPhrase(Element):
     pass
 
 
@@ -342,8 +345,8 @@ class ColGroup(Element):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'colgroup', attrs, contents)
 
-    def col(self, *contents, **attrs):
-        return Element(self, 'col', attrs, contents, self_close=True)
+    def col(self, **attrs):
+        return EmptyElement(self, 'col', attrs)
 
 class THead(Element):
     def __init__(self, parent, attrs, contents):
@@ -392,18 +395,18 @@ class TR(Element):
         return TH(self, {**attrs, 'class':_class}, contents)
 
 
-class TD(FlowElement):
+class TD(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'td', attrs, contents)
 
-class TH(FlowElement):
+class TH(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'th', attrs, contents)
 
 
 # ---- Definition list tags ----
 
-class DL(FlowElement):
+class DL(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'dl', attrs, contents)
 
@@ -419,18 +422,18 @@ class DL(FlowElement):
     def dd_class(self, _class, *contents, **attrs):
         return DD(self, {**attrs, 'class':_class}, contents)
 
-class DT(FlowElement):
+class DT(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'dt', attrs, contents)
 
-class DD(FlowElement):
+class DD(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'dd', attrs, contents)
 
 
 # ---- Media tags ----
 
-class Audio(PhraseElement):
+class Audio(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'audio', attrs, contents)
 
@@ -440,7 +443,7 @@ class Audio(PhraseElement):
     def track(self, **attrs):
         return EmptyElement(self, 'track', attrs)
 
-class Video(PhraseElement):
+class Video(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'video', attrs, contents)
 
@@ -450,7 +453,7 @@ class Video(PhraseElement):
     def track(self, **attrs):
         return EmptyElement(self, 'track', attrs)
 
-class Picture(PhraseElement):
+class Picture(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'picture', attrs)
 
@@ -460,12 +463,12 @@ class Picture(PhraseElement):
     def source(self, **attrs):
         return EmptyElement(self, 'source', attrs)
 
-class Figure(PhraseElement):
+class Figure(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'figure', attrs)
 
     def figcaption(self, *contents, **attrs):
-        return FlowElement(self, 'figcaption', attrs, contents)
+        return ElementWithFlow(self, 'figcaption', attrs, contents)
 
 class Img(EmptyElement):
     def __init__(self, parent, attrs):
@@ -474,7 +477,7 @@ class Img(EmptyElement):
 
 # ---- Form and input tags ----
 
-class Form(FlowElement):
+class Form(ElementWithFlow):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'form', attrs, contents)
 
@@ -485,11 +488,11 @@ class Input(EmptyElement):
     def __init__(self, parent, attrs):
         super().__init__(parent, 'input', attrs)
 
-class Button(PhraseElement):
+class Button(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'button', attrs, contents)
 
-class Select(PhraseElement):
+class Select(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'select', attrs, contents)
 
@@ -499,14 +502,14 @@ class Select(PhraseElement):
     def option(self, *contents, **attrs):
         return Option(self, attrs, contents)
 
-class OptGroup(PhraseElement):
+class OptGroup(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'optgroup', attrs, contents)
 
     def option(self, *contents, **attrs):
         return Option(self, attrs, contents)
 
-class Option(PhraseElement):
+class Option(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'option', attrs, contents)
 
@@ -516,26 +519,26 @@ class TextArea(TextOnlyElement):
 
 
 
-class Data(PhraseElement):
+class Data(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'data', attrs, contents)
 
-class Time(PhraseElement):
+class Time(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'time', attrs, contents)
 
-class Details(PhraseElement):
+class Details(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'details', attrs, contents)
 
     def summary(self, *contents, **attrs):
         return Summary(self, attrs, contents)
 
-class Summary(PhraseElement):
+class Summary(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'summary', attrs, contents)
 
-class Object(PhraseElement):
+class Object(ElementWithPhrase):
     def __init__(self, parent, attrs, contents):
         super().__init__(parent, 'object', attrs, contents)
 
@@ -577,7 +580,7 @@ def main():
         with page.element('html') as html:
             with html.element('head') as head:
                 head.element('title', {}, 'Sample Page')
-                head.element('meta', {'charset':'utf-8'}, self_close=True)
+                head.empty_element('meta', {'charset':'utf-8'})
             with html.element('body') as body:
                 with body.element('h1') as title:
                     title.text('Sample Title')
