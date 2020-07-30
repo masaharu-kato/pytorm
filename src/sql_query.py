@@ -1,12 +1,12 @@
-from typing import Any, Dict, Iterable, Iterator, List, Sequence, Optional, Tuple, Union, Type, cast
+from typing import Any, Callable, cast, Dict, final, Iterable, Iterator, List, NewType, NoReturn, Optional, overload, Sequence, Tuple, Type, TypeVar, Union
+from abc import ABCMeta, abstractmethod
 import sql_keywords
-from dataclasses import dataclass
+# from dataclasses import dataclass
 import datetime
-import mysql.connector as mydb # type:ignore
-import itertools
-import collections
-import toposort # type:ignore
-
+import mysql.connector # type:ignore
+# import itertools
+# import collections
+# import toposort # type:ignore
 
 
 QueryValTypes = [bool, int, float, str]
@@ -15,40 +15,31 @@ QueryVal = Union[bool, int, float, str]
 
 
 # def is_iterable(target) -> bool:
-#     return isinstance(target, Iterable) and not isinstance(target, str)
+#     return is_iterable(target) and not isinstance(target, str)
 
 # # def _kw_with_dots(kw:str) -> str:
 # #     return '.'.join(SQL.kw(w) for w in kw.split('.'))
 
+T = TypeVar('T')
+Ret = TypeVar('Ret')
 
-class SQLQuery(str):
-    """ SQL Query text object """
+# @overload
+# def func_or_map(func:Callable[[T], Ret], val:T) -> Ret: ...
 
-    def __init__(self, *exprs:ExprsStr, as_obj:bool=False, quoted:bool=False):
-        self.q = ' '.join(sql_or_str(expr, as_obj=as_obj, quoted=quoted) for expr in exprs)
+# @overload
+# def func_or_map(func:Callable[[T], Ret], val:Iterable[T]) -> Iterator[Ret]: ...
 
-    def __add__(self, expr:ExprsStr) -> 'SQLQuery':
-        return SQLQuery(self.q + ' ' + sql_or_str(expr))
-
-    def __radd__(self, expr:ExprsStr) -> 'SQLQuery':
-        return SQLQuery(sql_or_str(expr) + ' ' + self.q)
-
-    def __iadd__(self, expr:ExprsStr):
-        self.q += sql_or_str(expr)
-
-    def __sql__(self) -> 'SQLQuery':
-        return self
-            
-    def query(self) -> str:
-        """ Get Query string """
-        return self.q
-
-# SQLQueryLike = Union[SQLQuery, Iterable[ExprsStr]]
+def is_iterable(val) -> bool:
+    return not isinstance(val, str) and isinstance(val, Iterable)
 
 
+def func_or_map(func:Callable[[T], Ret], val) -> Union[Ret, List[Ret]]:
+    if is_iterable(val):
+        return list(map(func, val))
+    return func(val)
 
-# 
-class Expr:
+
+class Expr(metaclass=ABCMeta):
     """ SQL expression base type """
     def __add__(self, expr): return OpExpr('+', self, expr)
     def __sub__(self, expr): return OpExpr('-', self, expr)
@@ -72,64 +63,163 @@ class Expr:
 
     def __contains__(self, expr):
         """ 'A in B' expression """
-        return ExprIn(expr, self)
+        # return ExprIn(expr, self)
+        return OpExpr('IN', expr, self)
 
-    def __sql__(self) -> SQLQuery:
-        """ Convert to string for SQL """
-        pass
+    @abstractmethod
+    def __sql__(self) -> 'SQLQuery': pass
+
+    def __full_sql__(self) -> 'SQLQuery':
+        return self.__sql__() # default implementation
+
+    def alias(self, alias_name:str):
+        return AliasedExpr(self, alias_name)
+
+    @final
+    def __matmul__(self, alias_name:str):
+        if not isinstance(alias_name, str):
+            return NotImplemented
+        return self.alias(alias_name)
+
+    @abstractmethod
+    def __repr__(self) -> str: pass
+
+    def __bool__(self) -> bool:
+        raise NotImplementedError()
+
+    def __int__(self) -> int:
+        raise NotImplementedError()
+
+    def __float__(self) -> float:
+        raise NotImplementedError()
+
+    def __str__(self) -> str:
+        raise NotImplementedError()
+
+    def __hash__(self) -> int:
+        raise NotImplementedError()
+
+
+def is_same(expr1:Expr, expr2:Expr) -> bool:
+    return repr(expr1) == repr(expr2)
     
 
 ExprLike = Union[Expr, RawValTypes]
 Exprs = Union[Expr, Sequence[Expr]]
-ExprsStr = Optional[Union[Exprs, str]]
+ExprsStr = Optional[Union[Exprs, str, int]]
+
+
+class AliasedExpr(Expr):
+    """ SQL Expression with alias name """
+
+    def __init__(self, expr:Expr, alias_name:str) -> None:
+        self.expr = expr
+        self.alias_name = alias_name
+
+    def __sql__(self) -> 'SQLQuery':
+        return q_obj(self.alias_name)
+
+    def __full_sql__(self) -> 'SQLQuery':
+        return SQLQuery(self.expr.__sql__(), 'AS', q_obj(self.alias_name))
+
+    def __repr__(self) -> str:
+        return '{' + repr(self.expr) + '@' + self.alias_name + '}'
+
+
+class SQLQuery(Expr):
+    """ SQL Query text object """
+
+    def __init__(self, *exprs:ExprsStr, **options) -> None:
+        self.q = ''
+        for expr in exprs:
+            self._add_text(self._to_str(expr, **options))
+
+
+    def _add_text(self, text:Optional[str]) -> None:
+        if text:
+            # print('self.q({}) <- text({})'.format(self.q, text))
+            # print(self.q[-1] if self.q else None, text[0])
+            if self.q and self.q[-1] not in {'.', '('} and text[0] not in {'.', '(', ')'}:
+                self.q += ' '
+            self.q += text
+
+    def __add__(self, expr:ExprsStr) -> 'SQLQuery':
+        return SQLQuery(self.q, self._to_str(expr))
+
+    def __radd__(self, expr:ExprsStr) -> 'SQLQuery':
+        return SQLQuery(self._to_str(expr), self.q)
+
+    def __iadd__(self, expr:ExprsStr) -> 'SQLQuery':
+        self._add_text(self._to_str(expr))
+        return self
+
+    def __sql__(self) -> 'SQLQuery':
+        return self
+
+    def __repr__(self) -> str:
+        return 'SQL(' + self.q + ')'
+            
+    def query(self) -> str:
+        """ Get Query string """
+        return self.q
+
+    @classmethod
+    def _to_str(cls,
+        obj:ExprsStr,
+        *,
+        as_obj:bool=False,
+        quoted:bool=False,
+        use_full:bool=False,
+    ) -> str:
+
+        if obj is None:
+            return ''
+
+        if isinstance(obj, int):
+            if as_obj or quoted:
+                raise RuntimeError('Cannot specify `as_obj` or `quoted` for integer value.')
+            return str(obj)
+
+        if isinstance(obj, str):
+            raw = obj
+        else:
+            if isinstance(obj, Iterable):
+                return ', '.join(map(cls._to_str, obj))
+
+            if not isinstance(obj, Expr):
+                raise RuntimeError('Cannot convert value to SQL format.')
+
+            if use_full:
+                raw = obj.__full_sql__().query()
+            else:
+                raw = obj.__sql__().query()
+                
+        if as_obj:
+            if quoted:
+                raise RuntimeError('Cannot specify both `as_obj` and `quoted`.')
+            return '`' + raw.replace('`', '``') + '`'
+
+        if quoted:
+            return '"' + raw.replace('\\', '\\\\').replace('"', '\\"')
+
+        return raw
 
 
 
-def sql(obj:Exprs) -> str:
-
-    if isinstance(obj, Iterable):
-        return ', '.join(map(sql, obj))
-        
-    if hasattr(obj, '__sql__'):
-        return obj.__sql__().query()
-        
-    raise RuntimeError('Cannot convert value to SQL format.')
-
-
-def sql_or_str(obj:ExprsStr, *, as_obj:bool=False, quoted:bool=False) -> str:
-    if obj is None:
-        return ''
-
-    if isinstance(obj, int):
-        if as_obj or quoted:  raise RuntimeError('Cannot specify `as_obj` or `quoted` for integer value.')
-        return obj
-
-    if isinstance(obj, str):
-        raw = obj
-    else:
-        raw = sql(obj)
-
-    if as_obj:
-        if quoted: raise RuntimeError('Cannot specify both `as_obj` and `quoted`.')
-        return '`' + raw.replace('`', '``') + '`'
-
-    if quoted:
-        return '"' + raw.translate(str.maketrans({'"': '\\"', '\\': '\\\\'})) + '"'
-
-    return raw
+# SQLQueryLike = Union[SQLQuery, Iterable[ExprsStr]]
 
 
 # def sql_join(vals:Iterable[ExprsStr], delimiter:str = ', ') -> str:
 #     return delimiter.join(map(sql, vals))
 
-
-
+def q_obj(*obj:ExprsStr) -> SQLQuery:
+    return SQLQuery(*obj, as_obj=True)
 
 
 class Value(Expr):
     """ SQL value expression (int, float, string, datetime, ...) """
 
-    def __init__(self, v:RawValTypes):
+    def __init__(self, v:RawValTypes) -> None:
         self.v = v
 
     def __sql__(self) -> SQLQuery:
@@ -140,6 +230,9 @@ class Value(Expr):
             return SQLQuery(self.v.isoformat(), quoted=True)
 
         return SQLQuery(self.v.replace('"', '\\"'), quoted=True)
+
+    def __repr__(self) -> str:
+        return 'Val(' + repr(self.v) + ')'
 
 
 class Values(Expr):
@@ -154,11 +247,14 @@ class Values(Expr):
     def __sql__(self) -> SQLQuery:
         return SQLQuery('(', self.values, ')')
 
+    def __repr__(self) -> str:
+        return 'Vals(' + ', '.join(map(repr, self.values)) + ')'
+
 
 class OpExpr(Expr):
     """ Operator expression """
 
-    def __init__(self, op:str, larg, rarg):
+    def __init__(self, op:str, larg, rarg) -> None:
         self.op = op
         self.larg = to_expr(larg)
         self.rarg = to_expr(rarg)
@@ -167,6 +263,9 @@ class OpExpr(Expr):
         if self.op not in sql_keywords.operators:
             raise RuntimeError('Unknown operator `{}`'.format(self.op))
         return SQLQuery('(', self.larg, self.op, self.rarg, ')')
+
+    def __repr__(self) -> str:
+        return 'Op:' + repr(self.larg) + ' ' + self.op + ' ' + repr(self.rarg) + ')'
 
 
 # class MultipleOperation(Expr):
@@ -185,7 +284,7 @@ class OpExpr(Expr):
 class FuncExpr(Expr):
     """ Function expression """
     
-    def __init__(self, name:str, *args):
+    def __init__(self, name:str, *args) -> None:
         self.name = name
         self.args = [to_expr(arg) for arg in args]
 
@@ -194,23 +293,26 @@ class FuncExpr(Expr):
             raise RuntimeError('Unknown function `{}`'.format(self.name))
         return SQLQuery(self.name, '(', self.args, ')')
 
+    def __repr__(self) -> str:
+        return 'Func:' + self.name + '(' + ', '.join(map(repr, self.args)) + ')'
 
-class ExprIn(Expr):
-    """ 'A IN B' expression """
 
-    def __init__(self, target:Expr, values:Union[Values, Iterable[Expr]]):
-        self.target = to_expr(target)
-        self.values = values if isinstance(values, Values) else Values([to_expr(v) for v in values])
+# class ExprIn(Expr):
+#     """ 'A IN B' expression """
 
-    def __sql__(self) -> SQLQuery:
-        return SQLQuery(self.target, 'IN', self.values)
+#     def __init__(self, target:Expr, values:Union[Values, Iterable[Expr]]):
+#         self.target = to_expr(target)
+#         self.values = values if isinstance(values, Values) else Values([to_expr(v) for v in values])
+
+#     def __sql__(self) -> SQLQuery:
+#         return SQLQuery(self.target, 'IN', self.values)
 
 
 
 def to_expr(v:Any) -> Expr:
     if isinstance(v, Expr):
         return v
-    if isinstance(v, Iterable):
+    if is_iterable(v):
         return Values([to_expr(_v) for _v in v])
     return Value(v)
 
@@ -232,25 +334,35 @@ class SQLExecResult:
         return []
 
     def __iter__(self):
-        return iter([])
+        while False:
+            yield None
 
 
 class SQLExecutor:
     """ SQL Executor Object (Database Cursor) """
 
-    def __init__(self, *args, **options):
+    def __init__(self, *args, **options) -> None:
         # TODO: Implementation
-        pass
+        self.conn = None
+
+    def connect(self, *args, **kwargs):
+        self.close_connection()
+        self.conn = mysql.connector.connect(*args, **kwargs)
+
+    def close_connection():
+        if self.conn is not None:
+            self.conn.close()
 
 
     def exec(self, _q:SQLQuery, values:Optional[Iterable[QueryVal]] = None) -> SQLExecResult:
         q = to_sql_query(_q)
-        print('Exec SQL:', q, list(values) if values else None)
+        print('Exec SQL:', q, 'Values:', list(values) if values else None)
+        
         return SQLExecResult()
 
     def exec_many(self, _q:SQLQuery, vals_itr:Iterable[Iterable[QueryVal]]) -> SQLExecResult:
         q = to_sql_query(_q)
-        print('Execmany SQL:', q, [list(vals) for vals in vals_itr])
+        print('Execmany SQL:', q, 'Values:', [list(vals) for vals in vals_itr])
         return SQLExecResult()
 
 
@@ -285,73 +397,306 @@ def to_sql_query(q:SQLQuery) -> str:
 
 # ColIntType = ColType('INT', nullable=False)
 
+        
+TableName = NewType('TableName', str)
+ColumnName = NewType('ColumnName', str)
+
+
+class SchemaExpr(Expr):
+
+    @abstractmethod
+    def __repr__(self) -> str: pass
+    
+    # @abstractmethod
+    # def __hash__(self) -> int: pass
+    
+    # @abstractmethod
+    # def __eq__(self, expr) -> bool: pass
+
+    # @abstractmethod
+    # def __ne__(self, expr) -> bool: pass
+
+    @abstractmethod
+    def link_to(self, val): pass
+
+    @final
+    def __rshift__(self, val):
+        """ Operator self >> val implementation """
+        return self.link_to(val)
+
+    @final
+    def __lshift__(self, val):
+        """ Operator self << val implementation """
+        if not hasattr(val, 'link_to'):
+            return NotImplemented
+        return val.link_to(self)
+
+    @final
+    def __rrshift__(self, val):
+        """ Operator val >> self implementation """
+        if not hasattr(val, 'link_to'):
+            return NotImplemented
+        return val.link_to(self)
+
+    @final
+    def __rlshift__(self, val):
+        """ Operator val << self implementation """
+        return self.link_to(val)
+
+    @final
+    def __getitem__(self, val):
+        return self.link_to(val)
+
+
+class SingleSchemaExpr(SchemaExpr):
+
+    @abstractmethod
+    def entity(self): pass
+
+    @abstractmethod
+    def column_connections(self) -> Iterator[Tuple['Column', 'Column']]: pass
+
+
+class ColumnExpr(SingleSchemaExpr):
+
+    @abstractmethod
+    def entity(self) -> 'Column': pass
+
+    @final
+    def link_to(self, val):
+
+        if isinstance(val, str):
+            return self.link_to(self.entity().db().table(val))
+
+        if isinstance(val, Table):
+            return LinkedTable(val, self)
+
+        if isinstance(val, Column):
+            return self.link_to(val.table).column(val)
+
+        if isinstance(val, LinkedTable):
+            return self.link_to(val.linking_column).link_to(val.Table)
+
+        if isinstance(val, LinkedColumn):
+            return self.link_to(val.linked_table).column(val.column)
+
+        if isinstance(val, AliasedTable):
+            return AliasedTable(self.link_to(val.table), val.alias_name)
+
+        if isinstance(val, AliasedColumn):
+            return self.link_to(val.aliased_table).column(val.column)
+
+        if isinstance(val, Iterable):
+            return SchemaExprs(map(self.link_to, val))
+
+        raise TypeError('Unexcepted type `{}`.'.format(type(val)))
+
+
+
+class TableExpr(SingleSchemaExpr):
+
+    @abstractmethod
+    def entity(self) -> 'Table': pass
+
+    @abstractmethod
+    def _make_column(self, column_entity:'Column'): pass
+
+    def column(self, column_or_name:Union[ColumnName, ColumnExpr]):
+        if isinstance(column_or_name, ColumnExpr):
+            column = column_or_name.entity()
+            if not self.entity().column_exists(column):
+                raise RuntimeError('Column {} does not exist on {}.'.format(repr(column), repr(self)))
+        else:
+            column = self.entity().column_by_name(column_or_name)
+        
+        return self._make_column(column)
+
+
+    @final
+    def link_to(self, val):
+
+        if isinstance(val, str): # ColumnName
+            return self.column(val)
+
+        if isinstance(val, Table):
+            return LinkedTable(val, self.entity().column_links_to_table(val))
+
+        if isinstance(val, Column):
+            if self.entity().column_exists(val):
+                return self.column(val)
+            return self.link_to(val.table).column(val)
+
+        if isinstance(val, LinkedTable):
+            return self.link_to(val.linking_column).link_to(val.table)
+
+        if isinstance(val, LinkedColumn):
+            return self.link_to(val.linked_table).column(val.column)
+
+        if isinstance(val, AliasedTable):
+            return AliasedTable(self.link_to(val.table), val.alias_name)
+
+        if isinstance(val, AliasedColumn):
+            return self.link_to(val.aliased_table).column(val.column)
+
+        if isinstance(val, Iterable):
+            return SchemaExprs(map(self.link_to, val))
+
+        raise TypeError('Unexcepted type `{}`.'.format(type(val)))
+
+
+    def alias(self, alias_name:str) -> 'AliasedTable':
+        if isinstance(self, AliasedTable):
+            table = self.table
+        else:
+            table = self
+        return AliasedTable(table, alias_name)
+
+
+
+class SchemaExprs(SchemaExpr):
+
+    def __init__(self, schemas:Iterable['SchemaExpr']) -> None:
+        self.schemas = list(schemas)
+
+    def link_to(self, val) -> 'SchemaExprs':
+        return SchemaExprs(s.link_to(val) for s in self.schemas)
+
+    def flatten_schemas(self) -> Iterator['SchemaExpr']:
+        for schema in self.schemas:
+            if isinstance(schema, SchemaExprs):
+                yield from self.flatten_schemas()
+            else:
+                yield schema
+
+    def __sql__(self) -> SQLQuery:
+        return SQLQuery(self.schemas)
+
+    def __repr__(self) -> str:
+        return '(' + ', '.join(map(repr, self.schemas)) + ')'
+
+    def __iter__(self) -> Iterator[SchemaExpr]:
+        return iter(self.schemas)
+
+    # def __hash__(self) -> int:
+    #     return hash(repr(self))
+
+    # def __eq__(self, other) -> bool:
+    #     if not isinstance(other, SchemaExprs):
+    #         raise NotImplementedError()
+    #     return len(self.schemas) == len(other.schemas) and all(self_s == other_s for self_s, other_s in zip(self.schemas, other.schemas))
+
+    # def __ne__(self, other) -> bool:
+    #     return not self.__eq__(other)
+
 
 
 # Reference of Table
-@dataclass
-class TableRef:
-    db: 'Database'
-    name: str
+class TableRef(TableExpr):
 
-    def resolve(self) -> 'Table':
-        try:
-            return self.db.table(self.name)
-        except KeyError:
-            raise RuntimeError('Table reference resolution failed: `{}`'.format(self.name))
+    def __init__(self, db:'Database', name:TableName) -> None:
+        self.db = db
+        self.name = name
+        if self.db.table_exists(name):
+            self._entity = self.db.table(name)
 
-    def column_ref(self, name:str) -> 'ColumnRef':
-        return ColumnRef(self, name)
+    def resolve_reference(self) -> None:
+        if not self.reference_resolved():
+            if not self.db.table_exists(self.name):
+                raise RuntimeError('Failed to resolve reference: Table `{}` was not found in {}'.format(self.name, repr(self.db)))
+            self._entity = self.db.table(self.name)
 
-    def __getitem__(self, name:Union[str, Iterable[str]]) -> Union['ColumnRef', Iterator['ColumnRef']]:
-        if isinstance(name, Iterable) return (self[_name] for _name in name)
-        return self.column_ref(name)
+    def reference_resolved(self) -> bool:
+        return hasattr(self, '_entity')
+
+    def entity(self) -> 'Table':
+        if not self.reference_resolved():
+            self.resolve_reference()
+        return self._entity
+
+    def _make_column(self, column_entity:'Column'):
+        if not self.reference_resolved():
+            self.resolve_reference()
+        return self.entity()._make_column(column_entity)
+
+    def column_by_name(self, column_name:ColumnName):
+        if not self.reference_resolved():
+            return ColumnRef(self, column_name)
+        return self.entity().column_by_name(column_name)
+
+    def __repr__(self) -> str:
+        return repr(self.db) + '.ref:`' + self.name + '`'
+
+    def __sql__(self):
+        return self.entity().__sql__()
+
+    def column_connections(self):
+        return self.entity().column_connections()
         
 
 # Reference of Column
-@dataclass
-class ColumnRef:
-    table: Union['Table', TableRef]
-    name: str
+class ColumnRef(ColumnExpr):
 
-    def resolve(self) -> 'Column':
-        # Resolve table reference (if it is reference)
-        if isinstance(self.table, TableRef):
-            self.table = self.table.resolve()
+    def __init__(self, table:TableRef, name:ColumnName) -> None:
+        self.table = table
+        self.name = name
+        if self.table._entity:
+            self._entity = self.table.entity().column(name)
 
-        # Resolve column reference on table
-        if self.table.column_exists(self.name):
-            raise RuntimeError('Column reference resolution failed: `{}`'.format(self.name))
+    def resolve_reference(self):
+        if not self.reference_resolved():
+            self.table.resolve_reference()
+            self._entity = self.table.entity().column(self.name)
 
-        return self.table.column(self.name)
+    def reference_resolved(self) -> bool:
+        return hasattr(self, '_entity')
+
+    def entity(self) -> 'Column':
+        if not self.reference_resolved():
+            self.resolve_reference()
+        return self._entity
+
+    def __repr__(self) -> str:
+        return repr(self.table) + '.`' + self.name + '`'
+
+    def __sql__(self):
+        return self.entity().__sql__()
+
+    def column_connections(self):
+        return self.entity().column_connections()
 
 
-class Column(Expr):
+
+
+class Column(ColumnExpr):
     
     def __init__(self, 
-        name: str, # Column name
+        name: Union[str, ColumnName], # Column name
         basetype: str, # SQL Type
         *,
-        nullable: bool = True, # nullable or not
+        nullable: bool = False, # nullable or not
         default: Optional[Expr] = None, # default value
-        unique: bool = False, # unique key or not
-        primary: bool = False, # primary key or not
+        is_unique: bool = False, # unique key or not
+        is_primary: bool = False, # primary key or not
         auto_increment: Optional[bool] = None, # auto increment or not
-        links: Sequence[Union[Column, ColumnRef]] = [], # linked columns
-    ):
-        self.name = name
+        links: Sequence[Union['Column', ColumnRef]] = [], # linked columns
+    ) -> None:
+        self.name = cast(ColumnName, name)
         self.basetype = basetype
-        self.pytype = sql_keywords.types[basetype]
+        # self.pytype = sql_keywords.types[basetype]
         self.nullable = nullable
         self.default_expr = default
-        self.is_unique = unique
-        self.is_primary = primary
+        self.is_unique = is_unique
+        self.is_primary = is_primary
         self.auto_increment = auto_increment
+        self.links = list(links)
 
-        self.link_columns:Dict[str, Union[Column, ColumnRef]] = {} # Table name of link column -> Link column
-        for link_column in links:
-            if link_column.table.name in self.link_columns:
-                raise RuntimeError('Cannot link to multiple columns in the same table.')
-            self.link_columns[link_column.table.name] = link_column
+        self._reference_resolved = False
+
+        # self.link_table_columns:Dict[str, Union['Column', ColumnRef]] = {} # key: table name
+        # for link_column in links:
+        #     if link_column.table in self.link_table_columns:
+        #         raise RuntimeError('Cannot link to multiple columns in the same table.')
+        #     self.link_table_columns[link_column.table.name] = link_column
 
 
     def set_table(self, table:'Table') -> 'Column':
@@ -359,36 +704,95 @@ class Column(Expr):
         return self
 
 
+    def resolve_reference(self) -> None:
+        self.link_table_columns:Dict[TableName, Column] = {}
+        for column_or_ref in self.links:
+            column = column_or_ref.resolve_reference() if isinstance(column_or_ref, ColumnRef) else column_or_ref
+            if column.table.name in self.link_table_columns:
+                raise RuntimeError('Multiple link columns to the same table exist.')
+            self.link_table_columns[column.table.name] = column
+        # print(repr(self), self.links, self.link_table_columns)
+        self._reference_resolved = True
+
+    def reference_resolved(self) -> bool:
+        return self._reference_resolved
+
+
+    def db(self) -> 'Database':
+        return self.table.db
+
+    # def base_table(self) -> 'Table':
+    #     """ get the base table (from the linked table) """
+    #     return self.table.base_table()
+
+    def entity(self) -> 'Column':
+        return self
+
     def __sql__(self) -> SQLQuery:
-        return SQLQuery(sql(self.table) + '.' + SQLQuery(self.name, as_obj=True))
+        return SQLQuery(self.table, '.' + q_obj(self.name))
 
     def __repr__(self) -> str:
         return repr(self.table) + '.' + self.name
 
-    def __hash__(self) -> int:
-        return hash(repr(self))
+    # def link_tables(self) -> Iterator[Table]:
+    #     return (column.table for column in self.link_table_columns.values())
 
-    def link_tables(self) -> Iterator[Table]:
-        return (column.table for column in self.link_columns.values())
+    def has_connection_to(self, table_or_name:Union[TableName, TableExpr]) -> bool:
+        if not self.reference_resolved:
+            raise RuntimeError('References are not resolved.')
+        table = self.db().table(table_or_name)
+        return table.name in self.link_table_columns
 
-    def link_table_names(self) -> Iterator[str]:
-        return self.link_columns.keys()
+    # def link_to_linked_table(self, linked_table:'LinkedTable') -> 'LinkedTable':
+    #     column_connections = list(linked_table.column_connections())
+    #     c_linked_table = self.link_to_table(column_connections[0][0].table)
+    #     for column_from, column_to in column_connections:
+    #         c_linked_table = c_linked_table.column(column_from).link_to(column_to.table)
+    #     return c_linked_table
 
-    def link_to(self, table_name:str) -> 'LinkedTable':
-        if not table_name in self.link_table_names():
-            raise RuntimeError('Link to the specified table is not found.')
+    # def link_to(self, val):
+    #     if not self.reference_resolved:
+    #         raise RuntimeError('References are not resolved.')
 
-        return LinkedTable(self.link_columns[table_name].table, self.table)
+    #     if not isinstance(val, str) and isinstance(val, Iterable):
+    #         return SchemaExprs(map(self.link_to, val))
 
-    def __getitem__(self, table_name:Union[str, Iterable[str]]) -> Union['LinkedTable', Iterator['LinkedTable']]:
-        if isinstance(table_name, Iterable):
-            return (self[_table_name] for _table_name in table_name)
-        return self.link_to(table_name)
+    #     if isinstance(val, AliasedTable):
+    #         return AliasedTable(self.link_to(val.table), val.alias_name)
 
-    def resolve_reference(self) -> None:
-        for i, link_column in enumerate(self.link_columns):
-            if isinstance(link_column, ColumnRef):
-                self.link_columns[i] = link_column.resolve()
+    #     if isinstance(val, AliasedColumn):
+    #         return self.link_to(val.aliased_table).column(val.column)
+
+    #     if isinstance(val, LinkedTable):
+    #         return self.link_to(val.linking_column).link_to(val.Table)
+
+    #     if isinstance(val, LinkedColumn):
+    #         return self.link_to(val.linked_table).column(val.column)
+
+    #     if isinstance(val, Table):
+    #         return LinkedTable(val, self)
+
+    #     if isinstance(val, Column):
+    #         return self.link_to(val.table).column(val)
+
+    #     if isinstance(val, str):
+    #         return self.link_to(self.db().table(val))
+
+    #     raise TypeError('Unexcepted type `{}`.'.format(type(val)))
+
+
+    def column_connections(self) -> Iterator[Tuple['Column', 'Column']]:
+        return iter([])
+
+    def link_dest_column_of_table(self, table_or_name:Union[TableName, TableExpr]):
+        if not self.reference_resolved:
+            raise RuntimeError('References are not resolved.')
+        table = self.db().table(table_or_name)
+        if not table.name in self.link_table_columns:
+            raise RuntimeError('Link from {} to {} is not found.'.format(repr(self), repr(table)))
+        
+        return self.link_table_columns[table.name]
+
 
     def creation_sql(self) -> SQLQuery:
         q = SQLQuery(self.name, self.basetype)
@@ -400,22 +804,39 @@ class Column(Expr):
         return q
         
 
+# class ColumnsInTable(Expr):
+    
+#     def __init__(self, table:Union['Table', 'LinkedTable'], column_names:Iterable[str]):
+#         self.table = table
+#         self.columns = list(map(self.table.column, column_names))
+
+#     def __iter__(self):
+#         return iter(self.columns)
+
+#     def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+#         return self.table.column_connections()
+
+#     def __sql__(self) -> SQLQuery:
+#         return SQLQuery(self.columns)
 
 
 
-class Table(Expr):
 
-    def __init__(self, db:'Database', name:str, columns:Iterable[Column], **options):
+class Table(TableExpr):
+
+    def __init__(self, db:'Database', name:TableName, columns:Iterable[Column], **options) -> None:
         self.db = db
         self.name = name
         self.columns = list(column.set_table(self) for column in columns)
         self.column_dict = {column.name: column for column in self.columns}
-        # self.link_columns = [c for c in self.columns if c.links]
-        # self.linked_tables = set(column.link.table for column in self.link_columns)
-        # self.linkpaths:Optional[Dict[Table, List[Table]]] = None
+        # self.link_table_columns = [c for c in self.columns if c.links]
+        # self.linked_tables = set(column.link.table for column in self.link_table_columns)
+        # self.linkpaths:Optional[Dict[TableName, List[Table]]] = None
         # self.linked_fk_cols:List[Column] = set()
         # self.linked_tables = set()
         self.created_on_db = None
+
+        self.reference_resolved = False
 
         self.db.append_table(self)
 
@@ -432,58 +853,108 @@ class Table(Expr):
         #     fkey_col.link_col.table.linked_fk_cols.add(fkey_col)
         #     fkey_col.link_col.table.linked_tables.add(fkey_col.table)
 
-    def __sql__(self) -> SQLQuery:
-        return SQLQuery(self.name, as_obj=True)
-
-    def __repr__(self) -> str:
-        return 'Table({})'.format(self.name)
-
-    def __hash__(self) -> int:
-        return hash(self.db.name + '.' + self.name)
-        
-    def __eq__(self, other) -> bool:
-        return self.db == other.db and self.name == other.name
-
-
-    def column(self, col_name:str) -> Column:
-        return self.column_dict[col_name]
-
-    def column_exists(self, col_name:str) -> bool:
-        return col_name in self.column_dict
-
-    # def column_ref(self, col_name:str) -> ColumnRef:
-    #     return ColumnRef(self, col_name)
-
-    # def __getitem__(self, col_name:str) -> Union[Column, ColumnRef]:
-    #     if col_name in self.column_dict:
-    #         return self.column_dict[col_name]
-    #     return self.column_ref(col_name)
-
-    def __getitem__(self, name_or_names:Union[str, Iterable[str]]) -> Union[Column, Iterator[Column]]:
-        """ Get the column(s) by column name(s) """
-
-        # Multiple specifications
-        if isinstance(name_or_names, Iterable):
-            names = name_or_names
-            return (self[name] for name in names)
-
-        # Single specifications
-        name = name_or_names
-        return self.column(name)
-
-
-    # def __getattribute__(self, col_name:str) -> Column:
-    #     return self.__getitem__(col_name)
-
-
     def resolve_references(self) -> None:
         for column in self.columns:
             column.resolve_reference()
-        # self.link_tables = set(fcol.link_col.table for fcol in self.fk_cols)
-        # print(self.link_tables)
+
+        self.link_columns_to_table:Dict[TableName, List[Column]] = {}
+        for column_from in self.columns:
+            for table_name in column_from.link_table_columns:
+                if table_name not in self.link_columns_to_table:
+                    self.link_columns_to_table[table_name] = []
+                self.link_columns_to_table[table_name].append(column_from)
+
+        self.reference_resolved = True
 
 
-    # def refresh_linkpaths(self) -> Dict[Table, dict]:
+    def __sql__(self) -> SQLQuery:
+        """ SQL-query convertion """
+        return q_obj(self.name)
+
+    def __repr__(self) -> str:
+        """ string representation for debug """
+        return self.db.name + '{' + self.name + '}'
+
+    # def __hash__(self) -> int:
+    #     """ hash function """
+    #     return hash(repr(self))
+        
+    # def __eq__(self, other) -> bool:
+    #     """ equal operator """
+    #     if not isinstance(other, Table):
+    #         raise NotImplementedError('')
+    #     return self.db == other.db and self.name == other.name
+
+    # def __ne__(self, other) -> bool:
+    #     """ not equal operator """
+    #     return not self.__eq__(other)
+
+    def entity(self) -> 'Table':
+        """ get the unreferenced original table object """
+        return self
+
+    def base_table(self) -> 'Table':
+        """ get the base table (from the linked table) """
+        return self
+
+    def _make_column(self, column_entity:Column) -> Column:
+        return column_entity
+
+    def column_by_name(self, name:ColumnName) -> Column:
+        """ get column by name in this table """
+        if not name in self.column_dict:
+            raise RuntimeError('Column not found in this table.')
+        return self.column_dict[name]
+
+    def column_exists(self, col_or_name:Union[str, ColumnExpr]) -> bool:
+        """ check if the column exists in this table """
+        if isinstance(col_or_name, ColumnExpr):
+            return is_same(col_or_name.entity().table, self)
+        return col_or_name in self.column_dict
+
+    def has_connection_to(self, table:'Table') -> bool:
+        if not self.reference_resolved:
+            raise RuntimeError('References are not resolved in {}.'.format(repr(self)))
+        return not table in self.link_columns_to_table or len(self.link_columns_to_table[table.name]) != 1
+
+    def column_links_to_table(self, table:'Table') -> Column:
+        
+        if not self.reference_resolved:
+            raise RuntimeError('References are not resolved in {}.'.format(repr(self)))
+
+        # base_table = table.base_table()
+        base_table = table
+        
+        if not base_table.name in self.link_columns_to_table or not len(self.link_columns_to_table[base_table.name]):
+            raise RuntimeError('There are no columns from {} to {}'.format(repr(self), repr(base_table)))
+
+        columns = self.link_columns_to_table[base_table.name]
+        if len(columns) > 1:
+            raise RuntimeError('There are multiple columns ({}) to {}.'.format(', '.join(map(repr, columns)), repr(base_table)))
+
+        return columns[0]
+
+
+    # def link_to_table(self, table:'Table') -> 'LinkedTable':
+    #     return LinkedTable(table, self.column_links_to_table(table))
+
+    # def link_to_linked_table(self, linked_table:'LinkedTable') -> 'LinkedTable':
+    #     column_connections = list(linked_table.column_connections())
+    #     c_linked_table = self.link_to_table(column_connections[0][0].table)
+    #     for column_from, column_to in column_connections:
+    #         c_linked_table = c_linked_table.column(column_from).link_to(column_to.table)
+    #     return c_linked_table
+
+    # def link_to_column(self, column:Column) -> 'LinkedColumn':
+    #     return self.link_to_table(column.table).column(column)
+
+    # def link_to_linked_column(self, linked_column:'LinkedColumn') -> 'LinkedColumn':
+    #     return self.link_to_linked_table(linked_column.linked_table).column(linked_column.column)
+
+    def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+        return iter([])
+
+    # def refresh_linkpaths(self) -> Dict[TableName, dict]:
 
     #     if self.linkpaths is None:
     #         self.linkpaths = collections.defaultdict(lambda: [])
@@ -495,17 +966,14 @@ class Table(Expr):
 
 
 
-    def expr_str_to_column(self, col:Union[str, Expr]) -> Expr:
-        return self.column(col) if isinstance(col, str) else col
-
-    def to_column(self, col:Union[str, Column]) -> Column:
+    def expr_str_to_column(self, col:Union[ColumnName, Expr]) -> Expr:
         return self.column(col) if isinstance(col, str) else col
 
     def creation_sql(self) -> SQLQuery:
         return SQLQuery('CREATE TABLE ', SQLQuery(self.name, as_obj=True), '(', [c.creation_sql() for c in self.columns], ')')
 
     def exists_in_db(self) -> bool:
-        return len(self.db.exec(['SHOW TABLES LIKE', SQLQuery(self.name, as_obj=True)]).fetch_all()) > 0
+        return len(self.db.exec(SQLQuery('SHOW TABLES LIKE', SQLQuery(self.name, as_obj=True))).fetch_all()) > 0
 
     def create(self) -> SQLExecResult:
         """ Create table on the database """
@@ -517,47 +985,64 @@ class Table(Expr):
 
     def truncate(self) -> SQLExecResult:
         """ SQL Truncate table """
-        return self.db.exec(['TRUNCATE TABLE', self])
+        return self.db.exec(SQLQuery('TRUNCATE TABLE', self))
 
     def drop(self) -> SQLExecResult:
         """ SQL Drop table """
-        return self.db.exec(['DROP TABLE' + self])
+        return self.db.exec(SQLQuery('DROP TABLE' + self))
 
-    def prepare_select(self, columns: Optional[Sequence[Union[str, Expr]]] = None, *args, **kwargs) -> 'Select':
+    def prepare_select(self, columns: Optional[Sequence[Union[ColumnName, Expr]]] = None, *args, **kwargs) -> 'Select':
         if columns is None:
             return Select(self.db, self.columns, *args, **kwargs)
         return Select(self.db, [self.expr_str_to_column(column) for column in columns], *args, **kwargs)
 
 
+    def to_self_column(self, column_or_name:Union[ColumnName, Column]) -> Column:
+
+        if isinstance(column_or_name, str):
+            column = self.column(column_or_name)
+        else:
+            column = column_or_name
+        
+        if not is_same(column.table, self):
+            raise RuntimeError('Column(s) in the other table(s) are specified.')
+        
+        return column
+
     
-    def select(self, columns: Optional[Sequence[Union[str, Expr]]] = None, *args, **kwargs) -> SQLExecResult:
+    def select(self, columns: Optional[Sequence[Union[ColumnName, Expr]]] = None, *args, **kwargs) -> SQLExecResult:
         return self.prepare_select(columns, *args, **kwargs).exec()
 
 
     def insert(self,
-        columns: List[Column],
+        columns_or_names: Sequence[Union[ColumnName, Column]],
         vals_itr:Iterable[Iterable[ExprLike]],
     ) -> SQLExecResult:
         """ SQL INSERT query """
-
-        return self.exec_many(SQLQuery('INSERT INTO', self, '(', columns, ')',
-            'VALUES', '(', ['%s' for _ in range(len(columns))], ')'),
+        return self.db.exec_many(
+            SQLQuery(
+                'INSERT INTO', self, '(', [q_obj(c.name) for c in map(self.to_self_column, columns_or_names)], ')',
+                'VALUES', '(', [SQLQuery('%s') for _ in range(len(columns_or_names))], ')'
+            ),
             ((_to_query_val(val) for val in vals) for vals in vals_itr),
         )
 
         
     def update(self,
-        column_exprs: List[Tuple[Column, ExprLike]],
+        _raw_column_exprs: Union[Dict[ColumnName, ExprLike], Iterable[Tuple[Union[ColumnName, Column], ExprLike]]],
         where: Optional[ExprLike],
         count: Optional[int] = None,
     ) -> SQLExecResult:
         """ SQL UPDATE query """
+        raw_column_exprs = _raw_column_exprs.items() if isinstance(_raw_column_exprs, dict) else _raw_column_exprs
+        column_exprs = ((self.to_self_column(column_or_name), to_expr(expr)) for column_or_name, expr in raw_column_exprs)
 
-        q = SQLQuery('UPDATE', self, 'SET', [SQLQuery(col, '=',  expr) for col, expr in column_exprs])
-        if where: q += SQLQuery('WHERE', to_expr(where))
-        if count: q += SQLQuery('LIMIT', count)
-        
-        return self.exec(q)
+        return self.db.exec(SQLQuery(
+            'UPDATE', self,
+            'SET', [SQLQuery(column, '=', expr) for column, expr in column_exprs],
+            SQLQuery('WHERE', to_expr(where)) if where else None,
+            SQLQuery('LIMIT', count) if count else None,
+        ))
 
 
     def delete(self,
@@ -566,12 +1051,11 @@ class Table(Expr):
     ) -> SQLExecResult:
         """ SQL DELETE query """
 
-        q = SQLQuery('DELETE FROM', self)
-        if where: q += SQLQuery('WHERE', to_expr(where))
-        if count: q += SQLQuery('LIMIT', count)
-
-        return self.exec(q)
-
+        return self.db.exec(SQLQuery(
+            'DELETE FROM', self,
+            SQLQuery('WHERE', to_expr(where)) if where else None,
+            SQLQuery('LIMIT', count) if count else None,
+        ))
 
 
     def select_key_with_insertion(self,
@@ -595,37 +1079,230 @@ class Table(Expr):
 
 
 
-class LinkedColumn(Expr):
-    def __init__(self, linked_table:'LinkedTable', column:Column):
+class LinkedColumn(ColumnExpr):
+    def __init__(self, linked_table:'LinkedTable', column:Column) -> None:
+        
+        # Check types
+        if not isinstance(linked_table, LinkedTable) or not isinstance(column, Column):
+            raise TypeError()
+
         self.linked_table = linked_table
         self.column = column
 
 
-    def __getitem__(self, name:Union[str, Iterable[str]]) -> Union['LinkedTable', Iterator['LinkedTable']]:
-        return self.column[name]
+    def db(self) -> 'Database':
+        return self.column.db()
+
+    # def base_table(self) -> Table:
+    #     """ get the base table (from the linked table) """
+    #     return self.linked_table.base_table()
+
+    def entity(self) -> Column:
+        return self.column.entity()
+
+    def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+        return self.linked_table.column_connections()
+
+    def link_dest_column_of_table(self, table_or_name:Union[TableName, 'Table']) -> Column:
+        return self.column.link_dest_column_of_table(table_or_name)
+
+    def __repr__(self) -> str:
+        return repr(self.column) + '<-' + repr(self.linked_table.linking_column)
+
+    # def __hash__(self) -> int:
+    #     return hash(repr(self))
+
+    # def __eq__(self, other) -> bool:
+    #     if not isinstance(other, LinkedColumn):
+    #         raise NotImplementedError('')
+    #     return self.linked_table == other.linked_table and self.column == other.column
+
+    # def __ne__(self, other) -> bool:
+    #     return not self.__eq__(other)
+
+    def __sql__(self) -> SQLQuery:
+        return self.column.__sql__()
 
 
-class LinkedTable(Expr):
-    def __init__(self, table:Table, origin_table:Optional['LinkedTable']=None):
+
+
+class LinkedTable(TableExpr):
+    def __init__(self, table:Table, linking_column:Union[Column, LinkedColumn]) -> None:
+
+        # Check types
+        if not isinstance(table, Table):
+            raise TypeError('Unexcepted table type `{}`.'.format(type(table)))
+        if not isinstance(linking_column, Column) and not isinstance(linking_column, LinkedColumn):
+            raise TypeError('Unexcepted column type `{}`.'.format(type(linking_column)))
+
+
         self.table = table
-        self.origin_table = origin_table
+        self.linking_column = linking_column
+        
+        # Check given connection
+        if not self.linking_column.entity().has_connection_to(table):
+            raise RuntimeError('There is no connection form {} to {}.'.format(repr(self.linking_column), repr(self.table)))
 
 
-    def __getitem__(self, name:Union[str, Iterable[str]]) -> Union[LinkedColumn, Iterator[LinkedColumn]]:
-        if isinstance(name, Iterable):
-            return (self[_name] for _name in name)
-        return LinkedColumn(self, self.table[name])
+    def entity(self) -> Table:
+        return self.table.entity()
+
+    def _make_column(self, column_entity:Column) -> LinkedColumn:
+        return LinkedColumn(self, column_entity)
+
+    # def link_to_table(self, table:Table) -> 'LinkedTable':
+    #     return LinkedTable(table, LinkedColumn(self, self.table.column_links_to_table(table)))
+
+    # def link_to_linked_table(self, linked_table:'LinkedTable') -> 'LinkedTable':
+    #     column_connections = list(linked_table.column_connections())
+    #     c_linked_table = self.link_to_table(column_connections[0][0].table)
+    #     for column_from, column_to in column_connections:
+    #         c_linked_table = c_linked_table.column(column_from).link_to(column_to.table)
+    #     return c_linked_table
+
+    # def link_to_linked_column(self, linked_column:'LinkedColumn') -> 'LinkedColumn':
+    #     return self.link_to_linked_table(linked_column.linked_table).column(linked_column.column)
+
+    # def link_to_column(self, column:Column) -> 'LinkedColumn':
+    #     return self.link_to_table(column.table).column(column)
+
+    def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+        yield from self.linking_column.column_connections()
+        column = self.linking_column.entity()
+        yield (column, column.link_table_columns[self.table.name])
+
+    def __repr__(self) -> str:
+        return self.entity().db.name + '{' + repr(self.table) + '<-' + repr(self.linking_column) + '}'
+
+    def __sql__(self) -> SQLQuery:
+        return self.table.__sql__()
+
+
+class AliasedColumn(ColumnExpr):
+    """ Column of table alias name """
+    
+    def __init__(self, aliased_table:'AliasedTable', column:Column) -> None:
+
+        # Check type
+        if not isinstance(aliased_table, AliasedTable):
+            raise TypeError('Unexcepted table type `{}`.'.format(type(aliased_table)))
+
+        self.aliased_table = aliased_table
+        self.column = column
+
+    def entity(self) -> Column:
+        return self.column.entity()
+
+    def link_to(self, val):
+        return self.column.link_to(val)
+
+    def __rshift__(self, val):
+        """ Operator >> implementation """
+        return self.link_to(val)
+
+    def __lshift__(self, val):
+        """ Operator << implementation """
+        if not hasattr(val, 'link_to'):
+            raise NotImplementedError()
+        return val.link_to(self)
+
+    def __getitem__(self, val):
+        return self.column[val]
+
+    def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+        return self.aliased_table.column_connections()
+
+    def __sql__(self) -> SQLQuery:
+        """ SQL-query convertion """
+        return SQLQuery(self.aliased_table, '.' + q_obj(self.column.entity().name))
+
+    def __repr__(self) -> str:
+        return repr(self.aliased_table) + '.' + self.column.entity().name
+
+    # def __hash__(self) -> int:
+    #     return hash(repr(self))
+
+    # def __eq__(self, other) -> bool:
+    #     if not isinstance(other, AliasedColumn):
+    #         raise NotImplementedError('')
+    #     return self.aliased_table == other.aliased_table and self.column == other.column
+
+    # def __ne__(self, other) -> bool:
+    #     return not self.__eq__(other)
+
+
+
+class AliasedTable(TableExpr):
+    """ Table with alias name """
+    
+    def __init__(self, table:Union[Table, LinkedTable], alias_name:str) -> None:
+
+        # Check type
+        if not isinstance(table, Table) and not isinstance(table, LinkedTable):
+            raise TypeError('Unexcepted table type `{}`.'.format(type(table)))
+
+        self.table = table
+        self.alias_name = alias_name
+
+    def entity(self) -> Table:
+        return self.table.entity()
+
+    def _make_column(self, column_entity:Column) -> AliasedColumn:
+        return AliasedColumn(self, column_entity)
+
+    # def link_to(self, val):
+    #     if isinstance(val, Column):
+    #         if val in self.table.columns:
+    #             return self.column(val)
+    #         return self.link_to(val.table).column(val)
+
+    #     if isinstance(val, str):
+    #         return self.column(val)
+
+    #     return self.table.link_to(val)
+
+    def column_connections(self) -> Iterator[Tuple[Column, Column]]:
+        if isinstance(self.table, LinkedTable): 
+            yield from self.table.linking_column.column_connections()
+            column = self.table.linking_column.entity()
+            yield (column, self.column(column.link_table_columns[self.table.table.name]).entity())
+            return
+        return self.table.column_connections()
+
+    def __sql__(self) -> SQLQuery:
+        """ SQL-query convertion """
+        return q_obj(self.alias_name)
+
+    def __full_sql__(self) -> SQLQuery:
+        """ SQL-query of original table with alias """
+        return SQLQuery(self.table, 'AS', q_obj(self.alias_name))
+
+    def __repr__(self) -> str:
+        return self.entity().db.name + '{' + repr(self.table) + '@' + self.alias_name + '}'
+
+    # def __hash__(self) -> int:
+    #     return hash(repr(self))
+
+    # def __eq__(self, other) -> bool:
+    #     if not isinstance(other, AliasedTable):
+    #         raise NotImplementedError('')
+    #     return self.table == other.table and self.alias_name == other.alias_name
+
+    # def __ne__(self, other) -> bool:
+    #     return not self.__eq__(other)
 
 
 
 
-class Database(SQLExecutor):
-    def __init__(self, name:str):
+class Database(SchemaExpr, SQLExecutor):
+    def __init__(self, name:str) -> None:
         self.name = name
         self.tables:List[Table] = []
         self.table_dict :Dict[str, Table] = {}
         self.column_dict:Dict[str, Column] = {}
-        self.tables_priority:Dict[Table, int] = {}
+        # self.tables_priority:Dict[TableName, int] = {}
+
+        self.reference_resolved = False
 
 
     def __sql__(self) -> SQLQuery:
@@ -633,45 +1310,77 @@ class Database(SQLExecutor):
 
 
     def __repr__(self) -> str:
-        return 'DB({})'.format(self.name)
+        return self.name
 
-    def __hash__(self) -> int:
-        return hash(repr(self))
+    # def __hash__(self) -> int:
+    #     return hash(repr(self))
 
-    def __eq__(self, other) -> bool:
-        return self.name == other.name
+    # def __eq__(self, other) -> bool:
+    #     if not isinstance(other, Database):
+    #         raise NotImplementedError('')
+    #     return self.name == other.name
 
+    # def __ne__(self, other) -> bool:
+    #     return not self.__eq__(other)
 
-    def table(self, name:str) -> Table:
+    # def entity(self) -> 'Database':
+    #     return self
+
+    def table(self, name:Union[TableName, TableExpr]) -> Table:
         """ Get table object by table name """
+        if isinstance(name, TableExpr):
+            table = name.entity()
+            if not is_same(table.db, self):
+                raise RuntimeError('Table {} not found.'.format(repr(table)))
+            return table
+
+        if not name in self.table_dict:
+            raise RuntimeError('Table `{}` not found.'.format(name))
+
         return self.table_dict[name]
 
-    def table_exists(self, name:str) -> bool:
+    def table_exists(self, name:Union[TableName, TableExpr]) -> bool:
         """ Check if a table with the specified name exists """
+        if isinstance(name, TableExpr):
+            return is_same(name.entity().db, self)
         return name in self.table_dict
 
-    def table_ref(self, name:str) -> TableRef:
+    def table_ref(self, name:TableName) -> TableRef:
         """ Get the temporary reference of table """
         return TableRef(self, name)
 
-    def __getitem__(self, name_or_names:Union[str, Iterable[str]]) -> Union[Table, TableRef, Sequence[Table, TableRef]]:
-        """ Get the table(s) by table name(s) """
-
-        # Multiple specifications
-        if isinstance(name_or_names, Iterable):
-            names = name_or_names
-            return tuple(self[name] for name in names)
-
-        # Single specifications
-        # Returns the table object if exists, else returns its reference
-        name = name_or_names
+    def table_or_ref(self, name:Union[TableName, TableExpr]) -> Union[Table, TableRef]:
+        """ Get table object or its reference by table name """
+        if isinstance(name, TableExpr):
+            table = name.entity()
+            if is_same(table.db, self):
+                return table
+            else:
+                return self.table_ref(table.name)
+        
         if name in self.table_dict:
             return self.table_dict[name]
         return self.table_ref(name)
 
-    # def __getattribute__(self, name:str) -> Union[Table, TableRef]:
-    #     return self.__getitem__(name)
+    def link_to(self, val):
+        if isinstance(val, str) or isinstance(val, TableExpr):
+            return self.table(val)
 
+        if isinstance(val, Iterable):
+            return SchemaExprs(map(self.link_to, val))
+
+        raise TypeError('Unexcepted type `{}`.'.format(type(val)))
+        
+
+    # def __getitem__(self, val):
+    #     """ 
+    #         Get the table(s) by table name(s)
+    #         When the references are not resolved, get the table refernce(s) if not exists
+    #     """
+    #     return func_or_map(
+    #         self.table if self.reference_resolved else self.table_or_ref,
+    #         val
+    #     )
 
     # Called by Table object
     def append_table(self, table:Table) -> None:
@@ -681,9 +1390,9 @@ class Database(SQLExecutor):
             self.column_dict[table.name + '.' + column.name] = column
 
 
-    def prepare_table(self, name:str, columns:Iterable[Column], **options) -> Table:
+    def prepare_table(self, name:Union[str, TableName], columns:Iterable[Column], **options) -> Table:
         """ Prepare table for this database with table schema """
-        return Table(self, name, columns, **options)
+        return Table(self, cast(TableName, name), columns, **options)
 
 
     # def create_table(self, name:str, columns_args:Iterable[ColArgs], **options)) -> Table:
@@ -696,6 +1405,8 @@ class Database(SQLExecutor):
         """ Resolve references in tables """
         for table in self.tables:
             table.resolve_references()
+
+        self.reference_resolved = True
 
 
     # def refresh_tables_priority(self) -> None:
@@ -711,51 +1422,51 @@ class Database(SQLExecutor):
     #     return sorted(tables, key=lambda table: self.tables_priority[table])
 
 
-    def tables_fk_columns(self, tables:List[Table]) -> Iterable[Tuple[Table, Iterable[Column]]]:
-        sorted_tables = self.sort_tables_by_priority(tables)
-        print('sorted_tables:', list(t.name for t in sorted_tables))
-        for i, table in enumerate(sorted_tables):
-            yield (table, (fk_col for fk_col in table.fk_cols if fk_col.link_col.table in sorted_tables[:i]))
+    # def tables_fk_columns(self, tables:List[Table]) -> Iterable[Tuple[Table, Iterable[Column]]]:
+    #     sorted_tables = self.sort_tables_by_priority(tables)
+    #     print('sorted_tables:', list(t.name for t in sorted_tables))
+    #     for i, table in enumerate(sorted_tables):
+    #         yield (table, (fk_col for fk_col in table.fk_cols if fk_col.link_col.table in sorted_tables[:i]))
 
 
-    def tables_inner_join(self, tables:List[Table]) -> SQLQuery:
-        q = SQLQuery()
-        f_table_only = False
-        for table, fk_cols_itr in self.tables_fk_columns(tables):
-            fk_cols = list(fk_cols_itr)
-            if fk_cols:
-                q += SQLQuery('INNER JOIN', table, 'ON', ' & '.join('{} = {}'.format(sql(fk_col), sql(fk_col.link_col)) for fk_col in fk_cols))
-                f_table_only = False
-            else:   
-                if f_table_only: q += ','
-                q += table
-                f_table_only = True
-        return q
+    # def tables_inner_join(self, tables:List[Table]) -> SQLQuery:
+    #     q = SQLQuery()
+    #     f_table_only = False
+    #     for table, fk_cols_itr in self.tables_fk_columns(tables):
+    #         fk_cols = list(fk_cols_itr)
+    #         if fk_cols:
+    #             q += SQLQuery('INNER JOIN', table, 'ON', ' & '.join('{} = {}'.format(sql(fk_col), sql(fk_col.link_col)) for fk_col in fk_cols))
+    #             f_table_only = False
+    #         else:   
+    #             if f_table_only: q += ','
+    #             q += table
+    #             f_table_only = True
+    #     return q
 
 
-    @classmethod
-    def find_columns_in_expr(cls, expr:Expr) -> Iterator[Column]:
-        if isinstance(expr, Column):
-            yield expr
-        elif isinstance(expr, OpExpr):
-            yield from cls.find_columns_in_expr(expr.larg)
-            yield from cls.find_columns_in_expr(expr.rarg)
-        elif isinstance(expr, FuncExpr):
-            for carg in expr.args:
-                yield from cls.find_columns_in_expr(carg)
-        elif isinstance(expr, ExprIn):
-            yield from cls.find_columns_in_expr(expr.target) 
-        return
+    # @classmethod
+    # def find_columns_in_expr(cls, expr:Expr) -> Iterator[Column]:
+    #     if isinstance(expr, Column):
+    #         yield expr
+    #     elif isinstance(expr, OpExpr):
+    #         yield from cls.find_columns_in_expr(expr.larg)
+    #         yield from cls.find_columns_in_expr(expr.rarg)
+    #     elif isinstance(expr, FuncExpr):
+    #         for carg in expr.args:
+    #             yield from cls.find_columns_in_expr(carg)
+    #     elif isinstance(expr, ExprIn):
+    #         yield from cls.find_columns_in_expr(expr.target) 
+    #     return
 
 
-    @staticmethod
-    def tables_of_columns(columns:Iterable[Column]) -> Iterator[Table]:
-        return iter(set(col.table for col in columns))
+    # @staticmethod
+    # def tables_of_columns(columns:Iterable[Column]) -> Iterator[Table]:
+    #     return iter(set(col.table for col in columns))
         
 
-    def tables_inner_join_by_exprs(self, exprs:Iterable[Expr]) -> SQLQuery:
-        tables = list(self.tables_of_columns(itertools.chain.from_iterable(self.find_columns_in_expr(expr) for expr in exprs)))
-        return self.tables_inner_join(tables)
+    # def tables_inner_join_by_exprs(self, exprs:Iterable[Expr]) -> SQLQuery:
+    #     tables = list(self.tables_of_columns(itertools.chain.from_iterable(self.find_columns_in_expr(expr) for expr in exprs)))
+    #     return self.tables_inner_join(tables)
 
 
     def finalize_tables(self) -> None:
@@ -776,20 +1487,6 @@ class Database(SQLExecutor):
     #     return tables
 
 
-
-    def to_column(self, col:Union[str, Column]) -> Column:
-        return self.column_dict[col] if isinstance(col, str) else col
-
-    def to_table(self, table:Union[str, Table]) -> Table:
-        return self.table(table) if isinstance(table, str) else table
-
-    # def to_columns(self, columns:Sequence[Union[str, Column]]) -> List[Column]:
-    #     return list(map(self.to_column, columns))
-
-    # def to_tables(self, tables:Sequence[Union[str, Table]]) -> List[Table]:
-    #     return list(map(self.to_table, tables))
-
-
     # def select(self,
     #     columns : Sequence[Union[Expr, str]],
     #     where   : Optional[ExprLike] = None,
@@ -803,6 +1500,13 @@ class Database(SQLExecutor):
     # ) -> SQLExecResult:
 
 
+    def prepare_select(self, *args, **kwargs) -> 'Select':
+        return Select(self, *args, **kwargs)
+
+
+    def select(self, *args, **kwargs) -> SQLExecResult:
+        return self.prepare_select(*args, **kwargs).exec()
+
 
     def insert(self,
         columns: List[Column],
@@ -814,30 +1518,52 @@ class Database(SQLExecutor):
 
 
 
-
-class Select:
+class View:
 
     def __init__(self,
         db     : Database,
-        columns: Sequence[ExprLike],
+        columns: Sequence[Expr],
         *,
         where  : Optional[ExprLike] = None,
-        group  : Optional[Iterable[Column]] = None,
+        group  : Optional[Sequence[Expr]] = None,
         having : Optional[ExprLike] = None,
-        order  : Optional[Iterable[Tuple[Column, str]]] = None,
-        tables : Optional[Sequence[ExprLike]] = None,
+        order  : Optional[Iterable[Tuple[Expr, str]]] = None,
+        # tables : Optional[Sequence[ExprLike]] = None,
         count  : Optional[int] = None,
         offset : Optional[int] = None,
-    ):
-        self.db = db
-        self.column_exprs = columns
-        self.where_expr = to_expr(where) if where else None
-        self.group_exprs = group
-        self.having_expr = to_expr(having) if having else None
-        self.order_exprs = [(column, self._is_asc_or_desc(ad_str)) for column, ad_str in order] if order else None
-        self.tables_expr = tables or self.db.tables_of_columns(self.column_exprs) 
-        self.count = count
-        self.offset = offset
+    ) -> None:
+        self.db: Database = db
+        self.column_exprs: List[Expr] = list(columns)
+        self.where_expr  : Optional[Expr] = to_expr(where) if where is not None else None
+        self.group_exprs : Optional[Sequence[Expr]] = list(group) if group is not None else None
+        self.having_expr : Optional[Expr] = to_expr(having) if having is not None else None
+        self.order_exprs : Optional[List[Tuple[Expr, bool]]] = [(expr, self._is_asc_or_desc(ad_str)) for expr, ad_str in order] if order is not None else None
+        # self.tables_expr = tables or self.db.tables_of_columns(self.column_exprs) 
+        self.count : Optional[int] = count
+        self.offset: Optional[int] = offset
+
+
+    def sql_query(self) -> SQLQuery:
+        q = SQLQuery('SELECT', self.column_exprs, 'FROM', self.tables_query())
+        if self.where_expr  is not None: q += SQLQuery('WHERE', self.where_expr)
+        if self.group_exprs is not None: q += SQLQuery('GROUP BY', self.group_exprs)
+        if self.having_expr is not None: q += SQLQuery('HAVING', self.having_expr)
+        if self.order_exprs is not None: q += SQLQuery('ORDER BY', [SQLQuery(column, ('ASC' if dstr else 'DESC')) for column, dstr in self.order_exprs])
+        if self.count  is not None: q += SQLQuery('LIMIT', self.count)
+        if self.offset is not None: q += SQLQuery('OFFSET', self.offset)
+        return q
+
+    def exec(self):
+        self.result = self.db.exec(self.sql_query())
+
+    def __iter__(self):
+        return self.result
+
+    def next_block(self):
+        self.offset += self.count
+
+    def prev_block(self):
+        self.offset -= self.count
 
 
     @staticmethod
@@ -850,28 +1576,87 @@ class Select:
         raise RuntimeError('Invalid string of asc or desc')
 
 
-    def sql_query(self) -> SQLQuery:
-        q = SQLQuery('SELECT', self.column_exprs, 'FROM', self.tables_expr)
-        if self.where_expr : q += SQLQuery('WHERE', self.where_expr)
-        if self.group_exprs: q += SQLQuery('GROUP BY', self.group_exprs)
-        if self.having_expr: q += SQLQuery('HAVING', self.having_expr)
-        if self.order_exprs: q += SQLQuery('ORDER BY', [SQLQuery(column, ('ASC' if dstr else 'DESC')) for column, dstr in self.order_exprs])
-        if self.count  is not None: q += SQLQuery('LIMIT', self.count)
-        if self.offset is not None: q += SQLQuery('OFFSET', self.offset)
-        return q
+    @classmethod
+    def extract_column_exprs(cls, expr:Union[Exprs, Iterable[Exprs]]) -> Iterator[ColumnExpr]:
+        
+        # if is_iterable(expr):
+        if not isinstance(expr, str) and isinstance(expr, Iterable):
+            for _expr in expr:
+                yield from cls.extract_column_exprs(_expr)
+            return
+        
+        if isinstance(expr, ColumnExpr):
+            yield expr
+            return
+
+        if isinstance(expr, OpExpr):
+            yield from cls.extract_column_exprs(expr.larg)
+            yield from cls.extract_column_exprs(expr.rarg)
+            return
+
+        if isinstance(expr, FuncExpr):
+            for _expr in expr.args:
+                yield from cls.extract_column_exprs(_expr)
+            return
+
+        raise TypeError('Unexcepted type `{}`.'.format(type(expr)))
 
 
-    def exec(self):
-        self.result = self.db.exec(self.sql_query())
+    def all_exprs(self) -> Iterator[Exprs]:
+        yield from self.column_exprs
+        if self.where_expr is not None:
+            yield self.where_expr 
+        if self.group_exprs is not None:
+            yield from self.group_exprs
+        if self.having_expr is not None:
+            yield self.having_expr
+        if self.order_exprs is not None:
+            yield from (order_expr[0] for order_expr in self.order_exprs)
 
 
-    def __iter__(self):
-        return self.result
+    def tables_query(self) -> SQLQuery:
+
+        all_exprs = list(self.all_exprs())
+        all_column_exprs = list(self.extract_column_exprs(all_exprs))
+
+        tables_column_connections:Dict[TableName, List[Tuple[Column, Column]]] = {}
+        
+        for column_expr in all_column_exprs:
+            # print(repr(column_expr))
+
+            column_cons = list(column_expr.column_connections())
+            # print('column_cons:', column_cons)
+
+            if not column_cons:
+                continue
+            
+            c_table = column_cons[0][0].table 
+            
+            if c_table.name not in tables_column_connections:
+                tables_column_connections[c_table.name] = []
+            
+            c_cons = tables_column_connections[c_table.name]
+            for new_con in column_cons:
+                if all((is_same(new_con[0], _con[0]) and is_same(new_con[1], _con)) for _con in c_cons):
+                    # print('add', column_con)
+                    c_cons.append(new_con)
 
 
-    def next_block(self):
-        self.offset += self.count
+        tables_joins:List[SQLQuery] = []
 
-    def prev_block(self):
-        self.offset -= self.count
+        for table_name, column_connections in tables_column_connections.items():
 
+            c_query = SQLQuery(self.db.table(table_name))
+
+            for column_from, column_to in column_connections:
+
+                if isinstance(column_to, AliasedColumn):
+                    c_table_query = SQLQuery(column_to.aliased_table, use_full=True)
+                else:
+                    c_table_query = SQLQuery(column_to.table)
+
+                c_query += SQLQuery('INNER JOIN', c_table_query, 'ON', column_from, '=', column_to)
+                
+            tables_joins.append(c_query)
+
+        return SQLQuery(tables_joins)

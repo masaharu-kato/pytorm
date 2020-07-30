@@ -2,41 +2,42 @@ from typing import List, Dict, Set, Hashable, Optional
 from itertools import chain
 
 Node = Hashable
-
+Edges = Dict[Optional[Node], Set[Node]]
 
 class Graph:
-    def __init__(self, edges:Dict[Node, Set[Node]]):
+    def __init__(self, edges:Edges):
         self._edges = edges
-        self.roots = set(edges.keys()) - set(chain(*edges.values()))
+        self.roots:Set[Node] = set(n for n in edges.keys() if n is not None) - set(chain(nodes for key, nodes in edges.items() if key is not None))
 
 
     def edges(self, node:Node) -> Set[Node]:
         return self._edges[node] if node in self._edges else set()
 
 
-    def subgraph(self, /, targets:Optional[Set[Node]] = None, start:Optional[Node] = None) -> 'Graph':
-        res_graph:Dict[Node, Set[Node]] = {}
+    def subgraph(self, /, targets:Optional[Set[Node]] = None, start:Optional[Node] = None) -> Edges:
+        res_graph:Edges = {}
         if targets is not None:
-            checked:Set[Node] = set()
+            checked:Set[Optional[Node]] = set()
             self._out_subgraph_with_targets(targets, start, res_graph, checked)
         else:
             self._out_subgraph(start, res_graph)
         return res_graph
 
 
-    def sorted(self) -> 'Graph':
+    def sorted(self) -> Edges:
         return self.subgraph()
 
 
-    def _out_subgraph(self, node:Optional[Node], out:'Graph') -> None:
-        if node in out: return
-        out_lnodes = self.edges(node) if node is not None else self.roots
+    def _out_subgraph(self, node:Optional[Node], out:Edges) -> None:
+        if node in out:
+            return
+        out_lnodes:Set[Node] = self.edges(node) if node is not None else self.roots
         for lnode in out_lnodes:
             self._out_subgraph(lnode, out)
         out[node] = out_lnodes
 
 
-    def _out_subgraph_with_targets(self, target_nodes:Set[Node], cnode:Optional[Node], out:Dict[Node, Set[Node]], checked:Set[Node]) -> None:
+    def _out_subgraph_with_targets(self, target_nodes:Set[Node], cnode:Optional[Node], out:Edges, checked:Set[Optional[Node]]) -> None:
         if cnode in checked: return
         lnodes = self.edges(cnode) if cnode is not None else self.roots
         for lnode in lnodes:
@@ -48,7 +49,7 @@ class Graph:
         checked.add(cnode)
         
 
-    def groups(self) -> List['Graph']:
+    def groups(self) -> List[Edges]:
         return [self.subgraph(start=root_node) for root_node in self.roots]
 
 
