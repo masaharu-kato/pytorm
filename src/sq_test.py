@@ -1,9 +1,10 @@
 import sql_query as sq
 import string
 import itertools
+import datetime
 
 
-def create_database():
+def main():
     
     db = sq.Database('DB')
 
@@ -37,14 +38,16 @@ def create_database():
         sq.Column('rate', 'REAL'),
     ])
 
+
+    @db.table_class
+    class User:
+        name: str
+        age: int
+        birthday: datetime.date
+
+
     db.finalize_tables()
 
-    return db
-
-
-def main():
-
-    db = create_database()
 
     # kinds_records = [(i, 'kind{}'.format(c)) for i, c in enumerate(string.ascii_uppercase[:8], 1)]
     # subkinds_records = [(i, (i - 1) // 3 + 1, 'subkind{}'.format(c),) for i, c in enumerate(string.ascii_uppercase[:24], 1)]
