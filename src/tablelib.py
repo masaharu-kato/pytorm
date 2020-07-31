@@ -1,9 +1,9 @@
-from typing import List, Iterable, Iterator
+from typing import Dict, Iterable, Iterator, List
 
 class Table:
     def __init__(self, column_names:List[str], rows:Iterable[List]) -> None:
         self.column_names = column_names
-        self.column_name_to_index = {name, i for i, name in enumerate(self.column_names)}
+        self.column_name_to_index = {name: i for i, name in enumerate(self.column_names)}
         if len(self.column_names) != len(self.column_name_to_index):
             raise RuntimeError('There are columns of the same name.')
         self.rows = rows
