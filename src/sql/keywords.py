@@ -1,9 +1,14 @@
-operators = {
+"""
+    sql.keywords - The definitions of sql keywords etc.
+"""
+from typing import Set, Dict, Type
+
+operators:Set[str] = {
     'AND',
     '&&',
     '=',
     ':=',
-    'BETWEEN ... AND ...',
+    # 'BETWEEN ... AND ...',
     'BINARY',
     '&',
     '~',
@@ -29,7 +34,7 @@ operators = {
     'MOD',
     'NOT',
     '!',
-    'NOT BETWEEN ... AND ...',
+    # 'NOT BETWEEN ... AND ...',
     '!=',
     '<>',
     'NOT LIKE',
@@ -60,11 +65,11 @@ functions = {
     'ASIN',
     'AsText',
     'AsWKT',
-    'ASYMMETRIC_DECRYPT(',
-    'ASYMMETRIC_DERIVE(',
-    'ASYMMETRIC_ENCRYPT(',
-    'ASYMMETRIC_SIGN(',
-    'ASYMMETRIC_VERIFY(',
+    'ASYMMETRIC_DECRYPT',
+    'ASYMMETRIC_DERIVE',
+    'ASYMMETRIC_ENCRYPT',
+    'ASYMMETRIC_SIGN',
+    'ASYMMETRIC_VERIFY',
     'ATAN',
     'ATAN2',
     'ATAN',
@@ -100,10 +105,10 @@ functions = {
     'COT',
     'COUNT',
     'CRC32',
-    'CREATE_ASYMMETRIC_PRIV_KEY(',
-    'CREATE_ASYMMETRIC_PUB_KEY(',
-    'CREATE_DH_PARAMETERS(',
-    'CREATE_DIGEST(',
+    'CREATE_ASYMMETRIC_PRIV_KEY',
+    'CREATE_ASYMMETRIC_PUB_KEY',
+    'CREATE_DH_PARAMETERS',
+    'CREATE_DIGEST',
     'Crosses',
     'CURDATE',
     'CURRENT_DATE',
@@ -172,17 +177,17 @@ functions = {
     'IN',
     'INET_ATON',
     'INET_NTOA',
-    'INET6_ATON(',
-    'INET6_NTOA(',
+    'INET6_ATON',
+    'INET6_NTOA',
     'INSERT',
     'INSTR',
     'InteriorRingN',
     'Intersects',
     'INTERVAL',
     'IS_FREE_LOCK',
-    'IS_IPV4(',
-    'IS_IPV4_COMPAT(',
-    'IS_IPV4_MAPPED(',
+    'IS_IPV4',
+    'IS_IPV4_COMPAT',
+    'IS_IPV4_MAPPED',
     'IS_IPV6',
     'IS_USED_LOCK',
     'IsClosed',
@@ -378,7 +383,7 @@ functions = {
     'YEARWEEK',
 }
 
-reserved_words = {
+reserved_words:Set[str] = {
     'ACCESSIBLE',
     'ACCOUNT',
     'ACTION',
@@ -1094,7 +1099,7 @@ reserved_words = {
 }
 
 
-types = {
+types:Dict[str, Type] = {
     'TINYINT': int,
     'SMALLINT': int,
     'MEDIUMINT': int,
