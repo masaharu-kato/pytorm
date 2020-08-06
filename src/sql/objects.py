@@ -1,9 +1,11 @@
 """
     sql.schema - SQL schema abstract classes
 """
-from typing import Any, final, Iterable, Iterator, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, final, Iterable, Iterator, List, NewType, Optional, overload, Sequence, Tuple, Union
 from abc import abstractmethod
-from sql.expression import Expr, Query
+from sql.expression import Expr, ExprLike, to_expr, Query
+from sql.datatypes import DataType
+from sql.connector import Connector, Connection
 
 class SchemaExpr(Expr):
 
@@ -22,22 +24,19 @@ class SchemaExpr(Expr):
 
     @abstractmethod
     def link_to(self, val):
-        """ 
-            Return a linked schema object (may be aliased) 
+        """ Return a linked schema object (may be aliased) 
         """
 
     @final
     def __rshift__(self, val):
-        """ 
-            Syntax self >> val implementation
+        """ Syntax self >> val implementation
             Alias of link_to method
         """
         return self.link_to(val)
 
     @final
     def __lshift__(self, val):
-        """ 
-            Syntax self << val implementation
+        """ Syntax self << val implementation
             Alias of link_to method
         """
         if not hasattr(val, 'link_to'):
@@ -46,8 +45,7 @@ class SchemaExpr(Expr):
 
     @final
     def __rrshift__(self, val):
-        """ 
-            Syntax val >> self implementation
+        """ Syntax val >> self implementation
             Alias of link_to method
         """
         if not hasattr(val, 'link_to'):
@@ -56,24 +54,21 @@ class SchemaExpr(Expr):
 
     @final
     def __rlshift__(self, val):
-        """ 
-            Syntax val << self implementation
+        """ Syntax val << self implementation
             Alias of link_to method
         """
         return self.link_to(val)
 
     @final
     def __getitem__(self, val):
-        """ 
-            Syntax self[val] implementation
+        """ Syntax self[val] implementation
             Alias of link_to method
         """
         return self.link_to(val)
 
     @final
     def __getattr__(self, name:str):
-        """ 
-            Syntax self.name implementation
+        """ Syntax self.name implementation
             Alias of link_to method
         """
         try:
@@ -328,28 +323,59 @@ class ColumnRef(ColumnExpr):
 
 class Column(ColumnExpr):
     """ A Column object in the table """
+
+
+    @overload
+    def __init__(self, table:'Table', name:str, datatype:DataType, **options) -> None: ...
+
+    @overload
+    def __init__(self, name:str, datetype:DataType, **options) -> None: ...
+
+    @overload
+    def __init__(self, datetype:DataType, **options) -> None: ...
+
+    @overload
+    def __init__(self, **options) -> None: ...
     
-    def __init__(self, 
-        name: Union[str, ColumnName], # Column name
-        basetype: str, # SQL Type
-        *,
-        nullable: bool = False, # nullable or not
-        default: Optional[Expr] = None, # default value
-        is_unique: bool = False, # unique key or not
-        is_primary: bool = False, # primary key or not
+    def __init__(self,
+        *args,
+        table         : Optional['Table'] = None,
+        name          : Optional[str] = None,
+        datatype      : Optional[DataType] = None,
+        nullable      : bool = False, # nullable or not
+        default       : Optional[Expr] = None, # default value
+        is_unique     : bool = False, # unique key or not
+        is_primary    : bool = False, # primary key or not
         auto_increment: Optional[bool] = None, # auto increment or not
-        links: Sequence[Union['Column', ColumnRef]] = [], # linked columns
+        links         : Sequence[Union['Column', ColumnRef]] = [], # linked columns
+        **_options
     ) -> None:
-        self.name = ColumnName(name)
-        self.basetype = basetype
-        # self.pytype = sql_keywords.types[basetype]
+
+        if _options:
+            raise RuntimeError('Unused options: ' + repr(_options))
+
+        self.table = table if table is not None else (
+            args[0] if len(args) >= 3 else None
+        )
+        self.name = name if name is not None else (
+            args[1] if len(args) >= 3 else (
+                args[0] if len(args) == 2 else None
+            )
+        )
+        self.datatype = datatype if datatype is not None else (
+            args[2] if len(args) >= 3 else (
+                args[1] if len(args) == 2 else (
+                    args[0] if len(args) == 1 else None
+                )
+            )
+        )
+
         self.nullable = nullable
         self.default_expr = default
         self.is_unique = is_unique
         self.is_primary = is_primary
         self.auto_increment = auto_increment
         self.links = list(links)
-        self.table:'Table'
         self.column_links_table:Dict[TableName, Column]
         self._reference_resolved = False
 
@@ -360,9 +386,14 @@ class Column(ColumnExpr):
         #     self.column_links_table[link_column.table.name] = link_column
 
 
-    def set_table(self, table:'Table') -> 'Column':
-        """ set the table object """
+    def _set_table(self, table:'Table') -> 'Column':
+        """ set the table object (called by `Table` class) """
         self.table = table
+        return self
+
+    def _set_name(self, name:str) -> 'Column':
+        """ set the column name (called by `Table` class) """
+        self.name = name
         return self
 
     def resolve_reference(self) -> None:
@@ -420,13 +451,15 @@ class Column(ColumnExpr):
 
     def creation_sql(self) -> Query:
         """ Get the sql query to create this column """
-        q = Query(self.name, self.basetype)
-        if self.nullable: q += 'NOT NULL'
-        if self.default_expr: q += Query('DEFAULT', self.default_expr)
-        if self.is_unique: q += 'UNIQUE KEY'
-        if self.is_primary: q += 'PRIMARY KEY'
-        if self.auto_increment: q += 'AUTO_INCREMENT'
-        return q
+        return Query(
+            self.name,
+            self.datatype,
+            'NOT NULL' if self.nullable else None,
+            Query('DEFAULT', self.default_expr) if self.default_expr else None,
+            'UNIQUE KEY' if self.is_unique else None,
+            'PRIMARY KEY' if self.is_primary else None,
+            'AUTO_INCREMENT' if self.auto_increment else None,
+        )
         
 
 # class ColumnsInTable(Expr):
@@ -455,7 +488,7 @@ class Table(TableExpr):
     ) -> None:
         self.db = db
         self.name = name
-        self.columns = list(column.set_table(self) for column in columns)
+        self.columns = list(column._set_table(self) for column in columns)
         self.column_dict = {column.name: column for column in self.columns}
         # self.column_links_table = [c for c in self.columns if c.links]
         # self.linked_tables = set(column.link.table for column in self.column_links_table)
@@ -530,34 +563,35 @@ class Table(TableExpr):
 
     def exists_in_db(self) -> bool:
         """ Check the existense on the database """
-        return len(self.db.exec(Query(
-            'SHOW TABLES LIKE', Query(self.name, as_obj=True)
+        return len(self.db.execute(Query(
+            'SHOW TABLES LIKE',
+            Query.as_obj(self.name)
         )).fetch_all()) > 0
 
     def creation_sql(self) -> Query:
         """ Get the sql query to create table """
         return Query(
             'CREATE TABLE ',
-            Query(self.name, as_obj=True),
+            Query.as_obj(self.name),
             '(', [c.creation_sql() for c in self.columns], ')'
         )
 
-    def create(self) -> ExecutionQuery:
+    def create(self):
         """ Create table on the database """
-        return ExecutionQuery(self.creation_sql())
+        return self.db.execute(self.creation_sql())
 
     def create_if_not_exists(self) -> Optional[SQLExecResult]:
         if self.exists_in_db():
             return None
         return self.create()
 
-    def truncate(self) -> ExecutionQuery:
+    def truncate(self):
         """ SQL Truncate table """
-        return ExecutionQuery(Query('TRUNCATE TABLE', self))
+        return self.db.execute(Query('TRUNCATE TABLE', self))
 
-    def drop(self) -> ExecutionQuery:
+    def drop(self):
         """ SQL Drop table """
-        return ExecutionQuery(Query('DROP TABLE', self))
+        return self.db.execute(Query('DROP TABLE', self))
 
         
     ### ---- Database actions for table records ---- ###
@@ -567,12 +601,12 @@ class Table(TableExpr):
         *args,
         **kwargs
     ) -> 'Select':
-        if columns is None:
-            return Select(self.db, self.columns, *args, **kwargs)
         return Select(
-            self.db, 
-            [(self.to_self_column(column) if isinstance(column, str) else column)
-                for column in columns],
+            self.db,
+            [
+                (self.to_self_column(column) if isinstance(column, str) else column)
+                for column in columns
+            ] if columns is not None else self.columns,
             *args,
             **kwargs
         )
@@ -592,8 +626,11 @@ class Table(TableExpr):
         """ SQL INSERT query """
         return ExecutionQuery(
             Query(
-                'INSERT INTO', self, '(', [Query.as_obj(c.name) for c in map(self.to_self_column, columns_or_names)], ')',
-                'VALUES', '(', [Query('%s') for _ in range(len(columns_or_names))], ')'
+                'INSERT INTO', self, '(',[
+                    Query.as_obj(c.name) for c in map(self.to_self_column, columns_or_names)
+                ], ')', 'VALUES', '(', [
+                    Query('%s') for _ in range(len(columns_or_names))
+                ], ')'
             ),
             ((self.to_query_exec_val(val) for val in vals) for vals in vals_itr),
         )
@@ -602,13 +639,13 @@ class Table(TableExpr):
         _raw_column_exprs: Union[Dict[ColumnName, ExprLike], Iterable[Tuple[Union[ColumnName, Column], ExprLike]]],
         where: Optional[ExprLike],
         count: Optional[int] = None,
-    ) -> ExecutionQuery:
+    ):
         """ SQL UPDATE query """
         if isinstance(_raw_column_exprs, dict):
             raw_column_exprs = _raw_column_exprs.items()
         else:
             raw_column_exprs = _raw_column_exprs
-        return ExecutionQuery(Query(
+        return self.db.execute(Query(
             'UPDATE', self,
             'SET', [
                 Query(self.to_self_column(column_or_name), '=', to_expr(expr))
@@ -621,16 +658,16 @@ class Table(TableExpr):
     def delete(self,
         where: Optional[ExprLike],
         count: Optional[int] = None,
-    ) -> ExecutionQuery:
+    ):
         """ SQL DELETE query """
-        return ExecutionQuery(Query(
+        return self.db.execute(Query(
             'DELETE FROM', self,
             Query('WHERE', to_expr(where)) if where else None,
             Query('LIMIT', count) if count else None,
         ))
 
     def select_key_with_insertion(self,
-        columns : List[Column],
+        columns: List[Column],
         records_itr: Iterable[Iterable[ExprLike]],
     ) -> Dict[tuple, int]:
         """ SQL selections and insertion query """
@@ -661,15 +698,12 @@ class Table(TableExpr):
 
     def to_self_column(self, column_or_name:Union[ColumnName, Column]) -> Column:
         """ Get the column object which belongs to this table """
-
         if isinstance(column_or_name, str):
             column = self.column(column_or_name)
         else:
             column = column_or_name
-        
-        if not is_same(column.table, self):
+        if not self.is_same(column.table):
             raise RuntimeError('Column(s) in the other table(s) are specified.')
-        
         return column
 
     def column_by_name(self, name:ColumnName) -> Column:
@@ -681,7 +715,7 @@ class Table(TableExpr):
     def column_exists(self, col_or_name:Union[str, ColumnExpr]) -> bool:
         """ check if the column exists in this table """
         if isinstance(col_or_name, ColumnExpr):
-            return is_same(col_or_name.entity().table, self)
+            return self.is_same(col_or_name.entity().table)
         return col_or_name in self.column_dict
 
         
@@ -748,7 +782,10 @@ class ColumnInLinkedTable(ColumnExpr):
 class LinkedTable(TableExpr):
     """ A linked-table object """
 
-    def __init__(self, table:Table, linking_column:Union[Column, ColumnInLinkedTable]) -> None:
+    def __init__(self,
+        table: Table,
+        linking_column: Union[Column, ColumnInLinkedTable]
+    ) -> None:
 
         # Check types
         if not isinstance(table, Table):
@@ -875,17 +912,17 @@ class Database(SchemaExpr):
     def __init__(self, name:str) -> None:
         self.name = name
         self.tables:List[Table] = []
-        self.table_dict :Dict[str, Table] = {}
-        self.column_dict:Dict[str, Column] = {}
-        # self.tables_priority:Dict[TableName, int] = {}
-
+        self.table_dict :Dict[TableName, Table] = {}
         self.reference_resolved = False
+
+        self.connector :Optional[Connector ] = None
+        self.connection:Optional[Connection] = None
 
 
     ## ---- override methods ---- ##
 
     def __sql__(self) -> Query:
-        return Query(self.name, as_obj=True)
+        return Query.as_obj(self.name)
 
     def __repr__(self) -> str:
         return self.name
@@ -897,7 +934,7 @@ class Database(SchemaExpr):
         """ Get table object by table name """
         if isinstance(name, TableExpr):
             table = name.entity()
-            if not is_same(table.db, self):
+            if not self.is_same(table.db):
                 raise KeyError('Table {} not found.'.format(repr(table)))
             return table
 
@@ -909,7 +946,7 @@ class Database(SchemaExpr):
     def table_exists(self, name:Union[TableName, TableExpr]) -> bool:
         """ Check if a table with the specified name exists """
         if isinstance(name, TableExpr):
-            return is_same(name.entity().db, self)
+            return self.is_same(name.entity().db)
         return name in self.table_dict
 
     def table_ref(self, name:TableName) -> TableRef:
@@ -920,7 +957,7 @@ class Database(SchemaExpr):
         """ Get table object or its reference by table name """
         if isinstance(name, TableExpr):
             table = name.entity()
-            if is_same(table.db, self):
+            if self.is_same(table.db):
                 return table
             return self.table_ref(table.name)
         
@@ -936,7 +973,18 @@ class Database(SchemaExpr):
             return SchemaExprs(map(self.link_to, val))
 
         raise TypeError('Unexcepted type `{}`.'.format(type(val)))
-        
+
+
+    ## ---- database connection methods ---- ##
+    def connect(self, connector:Optional[Connector] = None):
+        if connector:
+            self.connector = connector
+        self.connection = connector.connect()
+
+    
+    def execute(self, query:Query, values):
+        return 
+
 
     ## ---- table creation methods ---- ##
     
@@ -958,8 +1006,6 @@ class Database(SchemaExpr):
     def append_table(self, table:Table) -> None:
         self.tables.append(table)
         self.table_dict[table.name] = table
-        for column in table.columns:
-            self.column_dict[table.name + '.' + column.name] = column
 
 
     ### ---- table resolution methods ---- ####

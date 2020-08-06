@@ -5,6 +5,7 @@ from typing import Any, Iterable, Iterator, List, Optional, Union
 import mysql.connector
 from sql.expression import Query
 
+
 class Connector:
     """ SQL Executor Object (Database Cursor) """
 
@@ -88,21 +89,11 @@ class Operation():
 
     def execute(self,
         q:Query,
-        params:Optional[Iterable[OperationParamType]] = None
+        values:Optional[Iterable[OperationParamType]] = None,
+        *,
+        many:bool = True
     ) -> List[List[Any]]:
         print('Exec SQL:', q, 'Values:', list(params) if params else None)
-        self.cur.execute(q.query(), params)
+        self.cur.execute(q.query_text(), params)
         return self.cur.fetchall()
 
-    def execute_many(self,
-        q:Query,
-        params_itr:Iterable[Iterable[OperationParamType]]
-    ) -> List[List[Any]]:
-        print('Execmany SQL:', q, 'Values:', [list(params) for params in params_itr])
-        self.cur.execute_many(q.query(), params_itr)
-        return self.cur.fetchall()
-
-
-
-
-        

@@ -1,40 +1,40 @@
-import sql
-import datetime
-import dataclasses
+from sql.datatypes import Int, Text, DateTime
+from sql.objects import Column
+from sql.schema import Database, Table
 
 db = sql.Database('DB')
 
-class Category(db.Table):
-    name: str
+class Category(Table):
+    name = Column(Text)
 
-class Group(db.Table):
-    category: Category
-    name: str
+class Group(Table):
+    category = Column(Category)
+    name     = Column(Text)
 
-class Item(db.Table):
-    group: Group
-    name: str
+class Item(Table):
+    group = Column(Group)
+    name  = Column(Text)
 
-class Shop(db.Table):
-    name: str
-    url: str
+class Shop(Table):
+    name = Column(Text)
+    url  = Column(Text)
 
-class ItemPrice(db.Table):
-    item: Item
-    shop: Shop
-    price: int
-    url: str
+class ItemPrice(Table):
+    item  = Column(Item)
+    shop  = Column(Shop)
+    price = Column(Int)
+    url   = Column(Text)
 
-class User(db.Table):
-    name: str
-    age: int
+class User(Table):
+    name = Column(Text)
+    age  = Column(Int)
 
-class Review(db.Table):
-    item: Item
-    user: User
-    datetime: datetime.datetime
-    rate: int
-    comment: str
+class Review(Table):
+    item     = Column(Item)
+    user     = Column(User)
+    datetime = Column(DateTime)
+    rate     = Column(Int)
+    comment  = Column(Text)
 
 
 # db = sq.Database('DB')

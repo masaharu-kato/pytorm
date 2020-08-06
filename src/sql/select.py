@@ -1,4 +1,6 @@
-
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from sql.expression import Expr, ExprLike, Query, to_expr
+from sql.objects import ColumnExpr, Column, ColumnInAliasedTable, Database, TableName
 
 class Select:
     """ The data object for the sql SELECT query """
@@ -27,26 +29,21 @@ class Select:
         self.count : Optional[int] = count
         self.offset: Optional[int] = offset
 
-
-    def sql_query(self) -> SQLQuery:
+    def sql_query(self) -> Query:
         """ Generate the sql SELECT query """
-        q = SQLQuery('SELECT', self.column_exprs, 'FROM', self.tables_query())
-        if self.where_expr  is not None:
-            q += SQLQuery('WHERE', self.where_expr)
-        if self.group_exprs is not None:
-            q += SQLQuery('GROUP BY', self.group_exprs)
-        if self.having_expr is not None:
-            q += SQLQuery('HAVING', self.having_expr)
-        if self.order_exprs is not None:
-            q += SQLQuery('ORDER BY', [
-                SQLQuery(column, ('ASC' if dstr else 'DESC'))
+        return Query(
+            'SELECT', self.column_exprs,
+            'FROM', self.tables_query(),
+            self._optional_query('WHERE', self.where_expr),
+            self._optional_query('GROUP BY', self.group_exprs),
+            self._optional_query('HAVING', self.having_expr),
+            self._optional_query('ORDER BY', [
+                Query(column, ('ASC' if dstr else 'DESC'))
                 for column, dstr in self.order_exprs
-            ])
-        if self.count  is not None:
-            q += SQLQuery('LIMIT', self.count)
-        if self.offset is not None:
-            q += SQLQuery('OFFSET', self.offset)
-        return q
+            ] if self.order_exprs is not None else None) ,
+            self._optional_query('LIMIT', self.count),
+            self._optional_query('OFFSET', self.offset),
+        )
 
     def exec(self):
         self.result = self.db.exec(self.sql_query())
@@ -59,6 +56,12 @@ class Select:
 
     def prev_block(self):
         self.offset -= self.count
+
+    @staticmethod
+    def _optional_query(*qargs) -> Optional[Query]:
+        if any(qarg is None for qarg in qargs):
+            return None
+        return Query(*qargs)
 
 
     @staticmethod
@@ -75,33 +78,14 @@ class Select:
 
     @classmethod
     def extract_column_exprs(cls,
-        expr:Union[Exprs, Iterable[Exprs]]
+        exprs:Iterable[Expr]
     ) -> Iterator[ColumnExpr]:
         """ Extract column schema expressions in the given expressions """
-        
-        if not isinstance(expr, str) and isinstance(expr, Iterable):
-            for _expr in expr:
-                yield from cls.extract_column_exprs(_expr)
-            return
-        
-        if isinstance(expr, ColumnExpr):
-            yield expr
-            return
-
-        if isinstance(expr, OpExpr):
-            yield from cls.extract_column_exprs(expr.larg)
-            yield from cls.extract_column_exprs(expr.rarg)
-            return
-
-        if isinstance(expr, FuncExpr):
-            for _expr in expr.args:
-                yield from cls.extract_column_exprs(_expr)
-            return
-
-        raise TypeError('Unexcepted type `{}`.'.format(type(expr)))
+        for expr in exprs:
+            yield from expr.extract_exprs()
 
 
-    def all_exprs(self) -> Iterator[Exprs]:
+    def all_exprs(self) -> Iterator[Expr]:
         """ Get the all expressions in this select object """
         yield from self.column_exprs
         if self.where_expr is not None:
@@ -114,7 +98,7 @@ class Select:
             yield from (order_expr[0] for order_expr in self.order_exprs)
 
 
-    def tables_query(self) -> SQLQuery:
+    def tables_query(self) -> Query:
         """ Generate the table-part of the sql query """
 
         all_exprs = list(self.all_exprs())
@@ -146,24 +130,24 @@ class Select:
                     c_cons.append(new_con)
 
 
-        tables_joins:List[SQLQuery] = []
+        tables_joins:List[Query] = []
 
         for table_name, column_connections in tables_column_connections.items():
 
-            c_query = SQLQuery(self.db.table(table_name))
+            c_query = Query(self.db.table(table_name))
 
             for column_from, column_to in column_connections:
 
                 if isinstance(column_to, ColumnInAliasedTable):
-                    c_table_query = SQLQuery(column_to.aliased_table, use_full=True)
+                    c_table_query = Query(column_to.aliased_table, use_full=True)
                 else:
-                    c_table_query = SQLQuery(column_to.table)
+                    c_table_query = Query(column_to.table)
 
-                c_query += SQLQuery(
+                c_query += Query(
                     'INNER JOIN', c_table_query,
                     'ON', column_from, '=', column_to
                 )
                 
             tables_joins.append(c_query)
 
-        return SQLQuery(tables_joins)
+        return Query(tables_joins)

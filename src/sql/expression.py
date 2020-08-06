@@ -10,105 +10,165 @@ from sql import keywords
 
 class Expr(metaclass=ABCMeta):
     """ SQL expression base type """
-    def __add__(self, expr):
-        return OpExpr('+', self, expr)
 
-    def __sub__(self, expr):
-        return OpExpr('-', self, expr)
-
-    def __mul__(self, expr):
-        return OpExpr('*', self, expr)
-
-    def __truediv__(self, expr):
-        return OpExpr('/', self, expr)
-
-    def __mod__(self, expr):
-        return OpExpr('%', self, expr)
-
-    def __and__(self, expr):
-        return OpExpr('&', self, expr)
-
-    def __or__ (self, expr):
-        return OpExpr('|', self, expr)
-
-    def __radd__(self, expr):
-        return OpExpr('+', expr, self)
-
-    def __rsub__(self, expr):
-        return OpExpr('-', expr, self)
-
-    def __rmul__(self, expr):
-        return OpExpr('*', expr, self)
-
-    def __rmod__(self, expr):
-        return OpExpr('%', expr, self)
-
-    def __rand__(self, expr):
-        return OpExpr('&', expr, self)
-
-    def __ror__ (self, expr):
-        return OpExpr('|', expr, self)
-
-    def __lt__(self, expr):
-        return OpExpr('<' , self, expr)
-
-    def __le__(self, expr):
-        return OpExpr('<=', self, expr)
-
-    def __eq__(self, expr):
-        return OpExpr('=' , self, expr)
-
-    def __ne__(self, expr):
-        return OpExpr('!=', self, expr)
-
-    def __gt__(self, expr):
-        return OpExpr('>' , self, expr)
-
-    def __ge__(self, expr):
-        return OpExpr('>=', self, expr)
-
-    def __contains__(self, expr):
-        """ 'A in B' expression """
-        return OpExpr('IN', expr, self)
+    ## ---- basic methods ---- ##
 
     @abstractmethod
     def __sql__(self) -> 'Query':
         """ Get the sql query expression """
 
     def __full_sql__(self) -> 'Query':
-        """ Get the full sql query expression """
+        """ Get the full sql query expression
+            In default, get the same expression as `self.__sql__()`
+
+            For example, in the aliased-table object, 
+                In `self.__sql__()`, returns the aliase name only
+                In `self.__full_sql__()`, returns the `expression AS alias-name` 
+                (See the implementation in AliasedTable class)
+        """
         return self.__sql__() # default implementation
 
     def alias(self, alias_name:str):
+        """ Return the aliased expression of this object
+        """
         return AliasedExpr(self, alias_name)
 
     @final
     def __matmul__(self, alias_name:str):
+        """ Return the aliased expression of this object
+            The alias of `self.alias(alias_name)`
+        """
         if not isinstance(alias_name, str):
             return NotImplemented
         return self.alias(alias_name)
 
     @abstractmethod
     def __repr__(self) -> str:
-        """ Get the string representation for debug """
+        """ Get the string representation for debug
+
+            The identity of `Expr` class objects as the database objects
+            are determined by this representation.
+        """
+
+    def extract_exprs(self) -> Iterator[Expr]:
+        """ Extract expression(s) in this expression
+            In default, return this expression object
+        """
+        yield self
+
+    @final
+    def is_same(self, expr) -> bool:
+        return is_same(self, expr)
+
+
+    ## ---- sql query operator expression ---- ##
+
+    def __add__(self, expr):
+        """ The sql query expression `self + expr` """
+        return OpExpr('+', self, expr)
+
+    def __sub__(self, expr):
+        """ The sql query expression `self - expr` """
+        return OpExpr('-', self, expr)
+
+    def __mul__(self, expr):
+        """ The sql query expression `self * expr` """
+        return OpExpr('*', self, expr)
+
+    def __truediv__(self, expr):
+        """ The sql query expression `self / expr` """
+        return OpExpr('/', self, expr)
+
+    def __mod__(self, expr):
+        """ The sql query expression `self % expr` """
+        return OpExpr('%', self, expr)
+
+    def __and__(self, expr):
+        """ The sql query expression `self & expr` """
+        return OpExpr('&', self, expr)
+
+    def __or__ (self, expr):
+        """ The sql query expression `self | expr` """
+        return OpExpr('|', self, expr)
+
+    def __radd__(self, expr):
+        """ The sql query expression `expr + self` """
+        return OpExpr('+', expr, self)
+
+    def __rsub__(self, expr):
+        """ The sql query expression `expr - self` """
+        return OpExpr('-', expr, self)
+
+    def __rmul__(self, expr):
+        """ The sql query expression `expr * self` """
+        return OpExpr('*', expr, self)
+
+    def __rtruediv__(self, expr):
+        """ The sql query expression `self / expr` """
+        return OpExpr('/', expr, self)
+
+    def __rmod__(self, expr):
+        """ The sql query expression `expr % self` """
+        return OpExpr('%', expr, self)
+
+    def __rand__(self, expr):
+        """ The sql query expression `expr & self` """
+        return OpExpr('&', expr, self)
+
+    def __ror__ (self, expr):
+        """ The sql query expression `expr | self` """
+        return OpExpr('|', expr, self)
+
+    def __lt__(self, expr):
+        """ The sql query expression `expr < self` """
+        return OpExpr('<' , self, expr)
+
+    def __le__(self, expr):
+        """ The sql query expression `expr <= self` """
+        return OpExpr('<=', self, expr)
+
+    def __eq__(self, expr):
+        """ The sql query expression `expr = self` """
+        return OpExpr('=' , self, expr)
+
+    def __ne__(self, expr):
+        """ The sql query expression `expr != self` """
+        return OpExpr('!=', self, expr)
+
+    def __gt__(self, expr):
+        """ The sql query expression `expr > self` """
+        return OpExpr('>' , self, expr)
+
+    def __ge__(self, expr):
+        """ The sql query expression `expr >= self` """
+        return OpExpr('>=', self, expr)
+
+    def __contains__(self, expr):
+        """ The sql query expression `expr IN self` """
+        return OpExpr('IN', expr, self)
+
+
+    ## ---- other not-implemented methods ---- ##
 
     def __bool__(self) -> bool:
-        raise NotImplementedError()
+        raise RuntimeError('Cannot convert expression object to boolean.')
 
     def __int__(self) -> int:
-        raise NotImplementedError()
+        raise RuntimeError('Cannot convert expression object to integer.')
 
     def __float__(self) -> float:
-        raise NotImplementedError()
+        raise RuntimeError('Cannot convert expression object to float.')
 
     def __str__(self) -> str:
-        raise NotImplementedError()
+        raise RuntimeError('Cannot convert expression object to string.')
 
     def __hash__(self) -> int:
-        raise NotImplementedError()
+        raise RuntimeError('Cannot calculate a hash value of expression object.')
 
 
 def is_same(expr1:Expr, expr2:Expr) -> bool:
+    if not isinstance(expr1, Expr) or not isinstance(expr2, Expr):
+        raise NotImplementedError()
     return repr(expr1) == repr(expr2)
        
 def to_expr(v:Any) -> Expr:
@@ -124,11 +184,7 @@ RawValType = Union[
     datetime.datetime, datetime.date, datetime.time
 ]
 ExprLike = Union[Expr, RawValType]
-Exprs = Union[Expr, Sequence[Expr]]
-QueryType = Union[
-    'Query', Expr, RawValType,
-    Iterable[Union['Query', Expr, RawValType]]
-]
+
 
 class AliasedExpr(Expr):
     """ SQL Expression with alias name """
@@ -151,17 +207,22 @@ class AliasedExpr(Expr):
 class Query(Expr):
     """ SQL Query text object """
 
-    def __init__(self, *exprs:Optional[QueryType], **options) -> None:
-        self.exprs:List[QueryType] = [expr for expr in exprs if expr is not None]
+    ArgType = Union[
+        'Query', Expr, RawValType,
+        Iterable[Union['Query', Expr, RawValType]]
+    ]
+
+    def __init__(self, *exprs:Optional[ArgType], **options) -> None:
+        self.exprs:List[ArgType] = [expr for expr in exprs if expr is not None]
         self.options = options
 
     def __sql__(self) -> 'Query':
         return self
 
     def __repr__(self) -> str:
-        return 'Query(' + ' '.join(map(repr, self.exprs)) + ', ' + self.options + ')'
+        return 'Query(' + ' '.join(map(repr, self.exprs)) + ', ' + repr(self.options) + ')'
             
-    def query(self) -> str:
+    def query_text(self) -> str:
         """ Get Query string """
         q = ''
         for expr in self.exprs:
@@ -176,7 +237,7 @@ class Query(Expr):
 
     @classmethod
     def _to_str(cls,
-        obj:QueryType,
+        obj:ArgType,
         *,
         as_obj:bool=False,
         quoted:bool=False,
@@ -201,9 +262,9 @@ class Query(Expr):
                 raise RuntimeError('Cannot convert value to SQL format.')
 
             if use_full:
-                raw = obj.__full_sql__().query()
+                raw = obj.__full_sql__().query_text()
             else:
-                raw = obj.__sql__().query()
+                raw = obj.__sql__().query_text()
                 
         if as_obj:
             if quoted:
@@ -216,12 +277,12 @@ class Query(Expr):
         return raw
 
     @staticmethod
-    def as_obj(*obj:Optional[QueryType]) -> 'Query':
+    def as_obj(*obj:Optional[ArgType]) -> 'Query':
         """ Create the query object with `as_obj` option """
         return Query(*obj, as_obj=True)
 
     @staticmethod
-    def quoted(*obj:Optional[QueryType]) -> 'Query':
+    def quoted(*obj:Optional[ArgType]) -> 'Query':
         """ Create the query object with `quoted` option """
         return Query(*obj, quoted=True)
 
@@ -280,6 +341,11 @@ class OpExpr(Expr):
     def __repr__(self) -> str:
         return 'Op:' + repr(self.larg) + ' ' + self.op + ' ' + repr(self.rarg) + ')'
 
+    def extract_exprs(self) -> Iterator[Expr]:
+        yield from super().extract_exprs()
+        yield from self.larg.extract_exprs()
+        yield from self.rarg.extract_exprs()
+
 
 # class MultipleOperation(Expr):
 
@@ -309,33 +375,8 @@ class FuncExpr(Expr):
     def __repr__(self) -> str:
         return 'Func:' + self.name + '(' + ', '.join(map(repr, self.args)) + ')'
 
-def to_sql_query(q:Query) -> str:
-    return q.query()
+    def extract_exprs(self) -> Iterator[Expr]:
+        yield from super().extract_exprs()
+        for arg in self.args:
+            yield from arg.extract_exprs()
 
-
-
-# class ColType:
-
-#     def __init__(self, basetype:str, *, nullable:bool=True, default:Optional[Expr]=None):
-#         self.basetype = basetype
-#         self.nullable = nullable
-#         self.default = default
-
-
-#     def pytype(self) -> Type:
-#         pybasetype = sql_keywords.types[self.basetype]
-#         if self.nullable:
-#             return cast(Type, Optional[pybasetype])
-#         return pybasetype
-
-
-#     def __sql__(self) -> str:
-#         return self.basetype
-
-
-#     def creation_sql(self) -> str:
-#         return self.basetype + (' NOT NULL' if not self.nullable else '')
-
-
-
-# ColIntType = ColType('INT', nullable=False)

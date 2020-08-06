@@ -1,6 +1,6 @@
 import sql.executor
 
-connector = sql.executor.Connector(
+sample_connector = sql.executor.Connector(
     host='hostname',
     port='3306',
     user='username',
