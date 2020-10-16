@@ -204,16 +204,16 @@ class AliasedExpr(Expr):
 
 
 
+ExprsArg = Union[
+    'Query', Expr, RawValType,
+    Iterable[Union['Query', Expr, RawValType]]
+]
+
 class Query(Expr):
     """ SQL Query text object """
 
-    ArgType = Union[
-        'Query', Expr, RawValType,
-        Iterable[Union['Query', Expr, RawValType]]
-    ]
-
-    def __init__(self, *exprs:Optional[ArgType], **options) -> None:
-        self.exprs:List[ArgType] = [expr for expr in exprs if expr is not None]
+    def __init__(self, *exprs:Optional[ExprsArg], **options) -> None:
+        self.exprs:List[ExprsArg] = [expr for expr in exprs if expr is not None]
         self.options = options
 
     def __sql__(self) -> 'Query':
@@ -237,7 +237,7 @@ class Query(Expr):
 
     @classmethod
     def _to_str(cls,
-        obj:ArgType,
+        obj:ExprsArg,
         *,
         as_obj:bool=False,
         quoted:bool=False,
@@ -277,12 +277,12 @@ class Query(Expr):
         return raw
 
     @staticmethod
-    def as_obj(*obj:Optional[ArgType]) -> 'Query':
+    def as_obj(*obj:Optional[ExprsArg]) -> 'Query':
         """ Create the query object with `as_obj` option """
         return Query(*obj, as_obj=True)
 
     @staticmethod
-    def quoted(*obj:Optional[ArgType]) -> 'Query':
+    def quoted(*obj:Optional[ExprsArg]) -> 'Query':
         """ Create the query object with `quoted` option """
         return Query(*obj, quoted=True)
 
